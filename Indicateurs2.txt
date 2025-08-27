@@ -1,0 +1,68 @@
+Plan d’Analyse des Prestations (Mutuelle de Santé)
+1. Objectif de l’analyse
+Évaluer les dépenses de santé prises en charge par la mutuelle.
+Comparer la répartition par actes, centres, partenaires et zones géographiques.
+Mesurer la performance du remboursement (taux d’acceptation, paiements effectués).
+Identifier les tendances pour anticiper la charge financière future.
+
+2. Préparation des données
+
+Vérifier que chaque enregistrement contient :
+ID de la prestation
+Type d’acte (consultation, hospitalisation, pharmacie, etc.)
+Date de prestation
+Montant demandé
+Montant payé
+Mutualiste (ID unique)
+Centre de santé / partenaire
+Région / province
+Statut de la prestation (accepté / rejeté / en attente)
+Nettoyage :
+Supprimer doublons.
+Normaliser les noms des partenaires (ex. “Clinique X” écrit de plusieurs façons).
+Vérifier cohérence des dates (2024 et 2025 uniquement).
+
+3. Indicateurs principaux à calculer
+A. Vue globale
+✅ Montant total des prestations (2024 + T1 2025).
+✅ Montant moyen par prestation.
+✅ Médiane des montants (permet de comparer avec la moyenne, utile si beaucoup d’extrêmes).
+
+B. Répartition par dimension
+✅ Montant total par acte (consultation, hospitalisation, pharmacie, examens…).
+✅ Montant total par centre de santé.
+✅ Montant total par partenaire (hôpital, clinique, pharmacie).
+✅ Montant total par région / province.
+✅ Nombre de mutualistes distincts par partenaire.
+✅ Nombre de prestations par type / sous-type.
+
+C. Performance du système
+✅ Nombre de prestations par statut (accepté, rejeté, en attente).
+✅ Taux d’acceptation = (prestations acceptées / prestations totales) × 100.
+✅ Montant non payé et pourcentage payé.
+✅ Coût moyen par mutualiste = (montant total payé / nombre de mutualistes distincts).
+
+D. Comparatifs et hiérarchies
+✅ Centres Top 5 ou Top 10 en nombre de prestations.
+✅ Partenaires qui génèrent le plus de coûts.
+✅ Actes les plus coûteux (classement).
+
+E. Analyse temporelle
+✅ Évolution mensuelle du nombre de prestations et des montants (2024 + 2025).
+✅ Comparaison entre les périodes (ex. T1 2024 vs T1 2025).
+✅ Identification de pics (ex. périodes de maladies saisonnières).
+
+4. Visualisations recommandées
+Histogrammes : montant total par acte, par centre, par partenaire.
+Courbes temporelles : évolution mensuelle des montants et du nombre de prestations.
+Camemberts : répartition par type/sous-type d’actes.
+Tableaux croisés dynamiques (Excel ou Power BI) : montant par région/province, par statut.
+Heatmap géographique (Power BI / Tableau) : montant total par région.
+Ranking (bar chart horizontal) : Top 10 centres/partenaires.
+
+5. Exploitation des résultats
+Identifier les partenaires les plus sollicités et voir si cela reflète un besoin réel ou un déséquilibre.
+Détecter les actes coûteux → utile pour ajuster les politiques de remboursement.
+Analyser les prestations rejetées → identifier causes et améliorer la qualité des dossiers.
+Suivre la tendance mensuelle → prévoir la charge budgétaire future.
+Mettre en place un tableau de bord trimestriel et annuel pour la direction de la mutuelle.

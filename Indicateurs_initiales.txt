@@ -1,0 +1,13 @@
+Indicateurs d’analyses des prestations saisies
+	Montant total des prestations (global) ;
+	Montant total par acte ;
+	Nombre de mutualistes distincts par partenaire ;
+	Montant total par centre de santé ;
+	Montant total par partenaire ;
+	Montant total par région / province ;
+	Montant moyen par prestation ;
+	Nombre de prestations / état de validité (accepté / rejeté / en attente) ;
+	Centres (05 ou 10) avec le plus de prestations ;
+	Évolution mensuelle (série temporelle) : montant et nombre ;
+	Nombre de prestations par type / sous type ;
+	Coût moyen par mutualiste ;
