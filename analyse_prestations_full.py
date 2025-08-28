@@ -20,6 +20,7 @@ from io import BytesIO
 import math
 from datetime import datetime
 from matplotlib.patches import Rectangle
+import time
 
 try:
     from fpdf import FPDF
@@ -37,6 +38,11 @@ LOGO_PATH = Path('logo_mupol.png')  # placer votre logo ici (PNG/JPG)
 PDF_USER_PWD = 'Lecture2025'       # mot de passe utilisateur (ouverture)
 PDF_OWNER_PWD = 'AdminSecure#2025' # mot de passe propriétaire (permissions)
 PDF_PERMISSIONS = ['print']        # ex: ['print', 'copy']
+
+# Stockage global des informations sur les doublons pour reporting
+DUPLICATES_INFO: dict = {}
+# Lignes dont les dates ont été corrigées (postérieures à juillet 2025 -> année 2024)
+DATES_CORRIGEES_DF: pd.DataFrame | None = None
 
 # Style global
 sns.set_theme(style='whitegrid', context='talk', palette='Set2')
@@ -66,6 +72,21 @@ def charger(fichier: str) -> pd.DataFrame:
     if date_cols:
         dc = date_cols[0]
         df[dc] = pd.to_datetime(df[dc], errors='coerce')
+        # Correction demandée : toute date postérieure à juillet 2025 -> année forcée à 2024 (mois & jour conservés)
+        try:
+            global DATES_CORRIGEES_DF
+            mask_fix = (df[dc].dt.year == 2025) & (df[dc].dt.month > 7)  # août (8) à décembre (12) 2025
+            if mask_fix.any():
+                subset = df.loc[mask_fix].copy()
+                subset['date_originale'] = subset[dc]
+                subset['date_corrigee'] = subset[dc].apply(lambda d: d.replace(year=2024) if pd.notna(d) else d)
+                # Appliquer correction sur le dataframe principal
+                df.loc[mask_fix, dc] = subset['date_corrigee']
+                # Sauvegarde globale (toutes colonnes + 2 colonnes info)
+                cols_order = ['date_originale','date_corrigee'] + [c for c in subset.columns if c not in {'date_originale','date_corrigee'}]
+                DATES_CORRIGEES_DF = subset[cols_order]
+        except Exception:
+            pass
     # Montant -> numérique (suppression séparateurs)
     montant_cols = [c for c in df.columns if c.lower() in {'montant', 'montant demande', 'montant demandé'}]
     if montant_cols:
@@ -88,7 +109,31 @@ def charger(fichier: str) -> pd.DataFrame:
         col = [c for c in df.columns if c.lower() == 'validite'][0]
         df.rename(columns={col: 'statut'}, inplace=True)
         df['statut'] = df['statut'].str.strip().str.lower()
-    # Nettoyage doublons
+    # Vérification et capture des doublons avant suppression
+    global DUPLICATES_INFO
+    # Doublons ligne entière
+    dups_full = df[df.duplicated(keep=False)].copy()
+    # Détection d'un identifiant unique potentiel
+    id_col = next((c for c in df.columns if 'identifiant' in c.lower()), None)
+    if id_col:
+        dups_id = df[df.duplicated(subset=[id_col], keep=False)].copy()
+    else:
+        dups_id = pd.DataFrame()
+    # Clé composite fréquente (si colonnes présentes)
+    composite_cols = [c for c in ['adherent_code','date','acte','montant'] if c in df.columns]
+    if composite_cols:
+        dups_composite = df[df.duplicated(subset=composite_cols, keep=False)].copy()
+    else:
+        dups_composite = pd.DataFrame()
+    DUPLICATES_INFO = {
+        'doublons_lignes': dups_full,
+        'doublons_identifiant': dups_id,
+        'doublons_cle_composite': dups_composite,
+        'nb_doublons_lignes': int(dups_full.shape[0]),
+        'nb_doublons_identifiant': int(dups_id.shape[0]) if not dups_id.empty else 0,
+        'nb_doublons_cle_composite': int(dups_composite.shape[0]) if not dups_composite.empty else 0
+    }
+    # Suppression doublons lignes pour analyses
     df.drop_duplicates(inplace=True)
     # Filtre années 2024-2025 si date existe
     if date_cols:
@@ -487,16 +532,48 @@ def annotate_line_no_overlap(ax, x_vals, y_vals, texts, min_gap_frac=0.02, base_
 def export_excel(global_indic: dict, reps: dict, evo: pd.DataFrame, comp_t1: pd.DataFrame, df: pd.DataFrame):
     # Préparation indicateurs avec labels FR
     indic_fr = {INDIC_LABELS.get(k, k): v for k, v in global_indic.items()}
-    with pd.ExcelWriter(OUTPUT_EXCEL) as writer:
+    target = OUTPUT_EXCEL
+    attempt = 0
+    while True:
+        try:
+            writer_ctx = pd.ExcelWriter(target)
+            break
+        except PermissionError:
+            attempt += 1
+            if attempt > 1:
+                # Générer un nouveau nom horodaté
+                ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+                target = f"rapport_prestations_complet_{ts}.xlsx"
+            time.sleep(0.4)
+    with writer_ctx as writer:
         (pd.Series(indic_fr).to_frame('Valeur')).to_excel(writer, sheet_name='Indicateurs')
         for key, val in reps.items():
             sheet = key.replace('repartition_', 'rep_')[:31]
             df_tmp = val.copy()
             if key != 'repartition_par_province' and not isinstance(df_tmp.index, pd.MultiIndex):
                 df_tmp = df_tmp.reset_index()
+                # Ajout de la colonne Numéro sauf pour le tableau statut
+                if key != 'repartition_par_statut':
+                    df_tmp.insert(0, 'Numéro', range(1, len(df_tmp) + 1))
                 if len(df_tmp.columns):
-                    first_col = df_tmp.columns[0]
+                    first_col = df_tmp.columns[1] if 'Numéro' in df_tmp.columns else df_tmp.columns[0]
+                    # Renommer première colonne de catégorie
                     df_tmp.rename(columns={first_col: HEADER_FIRST_MAP.get(key, first_col)}, inplace=True)
+            elif key == 'repartition_par_province':
+                # Ajouter Numéro en première colonne (sauf statut exclu déjà géré)
+                if len(df_tmp):
+                    df_tmp.insert(0, 'Numéro', range(1, len(df_tmp) + 1))
+                    # Réordonner pour avoir Numéro, Province, Région puis métriques (Province avant Région comme dans HTML)
+                    cols = df_tmp.columns.tolist()
+                    order = ['Numéro']
+                    if 'Province' in cols:
+                        order.append('Province')
+                    if 'Region' in cols:
+                        order.append('Region')
+                    for c in cols:
+                        if c not in order:
+                            order.append(c)
+                    df_tmp = df_tmp[order]
             df_tmp.rename(columns=COL_LABELS, inplace=True)
             df_tmp.to_excel(writer, sheet_name=sheet, index=False)
         if not evo.empty:
@@ -507,6 +584,38 @@ def export_excel(global_indic: dict, reps: dict, evo: pd.DataFrame, comp_t1: pd.
             comp_fr.to_excel(writer, sheet_name='Comparaison_T1')
         # Données brutes
         df.to_excel(writer, sheet_name='Donnees_nettoyees', index=False)
+        # Doublons (reporting)
+        if DUPLICATES_INFO:
+            for key_sheet, df_dup in [
+                ('Doublons_lignes', DUPLICATES_INFO.get('doublons_lignes')),
+                ('Doublons_identifiant', DUPLICATES_INFO.get('doublons_identifiant')),
+                ('Doublons_cle_comp', DUPLICATES_INFO.get('doublons_cle_composite'))
+            ]:
+                if isinstance(df_dup, pd.DataFrame) and not df_dup.empty:
+                    # Ajouter une colonne Occurrences si pertinent (pour identifiant / clé composite)
+                    if key_sheet != 'Doublons_lignes':
+                        col_sub = []
+                        if key_sheet == 'Doublons_identifiant':
+                            col_sub = [c for c in df_dup.columns if 'identifiant' in c.lower()][:1]
+                        elif key_sheet == 'Doublons_cle_comp':
+                            col_sub = [c for c in ['adherent_code','date','acte','montant'] if c in df_dup.columns]
+                        if col_sub:
+                            occ = (df_dup.groupby(col_sub)
+                                         .size()
+                                         .reset_index(name='Occurrences')
+                                         .sort_values('Occurrences', ascending=False))
+                            occ.to_excel(writer, sheet_name=(key_sheet + '_occ')[:31], index=False)
+                    df_dup.to_excel(writer, sheet_name=key_sheet[:31], index=False)
+        # Lignes de dates corrigées
+        if DATES_CORRIGEES_DF is not None and not DATES_CORRIGEES_DF.empty:
+            tmp_dates = DATES_CORRIGEES_DF.copy()
+            # Formatage lisible dates
+            for dc_col in ['date_originale','date_corrigee']:
+                if dc_col in tmp_dates.columns:
+                    tmp_dates[dc_col] = tmp_dates[dc_col].dt.strftime('%d/%m/%Y')
+            tmp_dates.to_excel(writer, sheet_name='Dates_corrigees', index=False)
+    if target != OUTPUT_EXCEL:
+        print(f"[INFO] Fichier Excel initial verrouillé. Export sauvegardé sous: {target}")
 
 # ------------------ Export PDF ------------------ #
 
@@ -637,19 +746,24 @@ def export_pdf(global_indic: dict, reps: dict, images_paths, evo: pd.DataFrame, 
             pdf.set_fill_color(230, 230, 230)
             label_first = header_first_map.get(key, 'Catégorie')
             if key == 'repartition_par_province':
-                # Colonnes: Province | Région (fusionnée) | métriques
+                # Colonnes: N° | Province | Région (fusionnée) | métriques
+                num_col_w = 12
+                pdf.cell(num_col_w, 6, 'N°', border=1, fill=True)
                 pdf.cell(first_col_width, 6, 'Province', border=1, fill=True)
                 pdf.cell(first_col_width, 6, 'Région', border=1, fill=True)
                 metric_cols = [c for c in cols if c not in ('Region','Province')]
+                width_metrics_total = 190 - first_col_width - first_col_width - num_col_w
                 for col in metric_cols:
-                    pdf.cell( (remaining - first_col_width) / max(1,(len(cols)-2)), 6, COL_LABELS.get(col,col), border=1, fill=True)
+                    pdf.cell( width_metrics_total / max(1,len(metric_cols)), 6, COL_LABELS.get(col,col), border=1, fill=True)
                 pdf.ln(6)
                 # Lignes avec fusion logique (répéter région seulement si change)
                 last_region = None
+                numero = 1
                 for _, row in df_rep.iterrows():
                     reg = row.get('Region','')
                     prov = row.get('Province','')
-                    # Province toujours
+                    # Numéro + Province toujours
+                    pdf.cell(num_col_w, 6, str(numero), border=1)
                     pdf.cell(first_col_width, 6, str(prov)[:18], border=1)
                     # Région fusionnée visuellement (cellule vide si répétée)
                     if reg != last_region:
@@ -666,8 +780,9 @@ def export_pdf(global_indic: dict, reps: dict, images_paths, evo: pd.DataFrame, 
                                 val_str = f"{val:,.2f}".replace(',', ' ').replace('.', ',')
                         else:
                             val_str = str(val)
-                        pdf.cell( (remaining - first_col_width) / max(1,(len(cols)-2)), 6, val_str, border=1)
+                        pdf.cell( width_metrics_total / max(1,len(metric_cols)), 6, val_str, border=1)
                     pdf.ln(6)
+                    numero += 1
                 pdf.ln(4)
                 continue
             pdf.cell(first_col_width, 6, label_first, border=1, fill=True)
@@ -707,7 +822,7 @@ def export_pdf(global_indic: dict, reps: dict, images_paths, evo: pd.DataFrame, 
     "Répartition des montants par acte (camembert) : part relative de chaque catégorie d'actes dans la dépense totale.",
     "Top 10 centres (montant / nombre) : centres présentant les montants remboursés les plus élevés et/ou le plus grand nombre de prestations.",
     "Top 10 partenaires : partenaires avec les montants remboursés les plus élevés et/ou le plus grand nombre de prestations.",
-        "Répartition par statut : proportion de prestations acceptées vs autres statuts.",
+        "Répartition par statut de traitement : proportion de prestations acceptées vs autres statuts.",
         "Répartition par région / province : concentration géographique des montants et volumes.",
         "Évolution mensuelle : barres = nombre de prestations, ligne = montant total, annotations = montant abrégé + (nombre).",
         "Évolution trimestrielle : tendance consolidée par trimestre (montant + nombre).",
@@ -876,16 +991,66 @@ def generer_rapport_html(global_indic: dict, reps: dict, evo: pd.DataFrame, comp
             s = s.replace(',', ' ').replace('.', ',')
             return s
         return str(v)
+    # Exclure des indicateurs globaux : montants payés / non payés (ils vont dans Traitement des données)
+    exclude_keys = {'montant_paye_total','montant_non_paye','pourcentage_paye_pct'}
     rows_indic = '\n'.join(
         f'<tr><td>{INDIC_LABELS.get(k,k)}</td><td>{fmt(v if not isinstance(v, pd.Timestamp) else v.strftime("%d/%m/%Y"))}</td></tr>'
-        for k, v in global_indic.items())
+        for k, v in global_indic.items() if k not in exclude_keys)
+    # Ajout synthèse doublons (compteurs) dans indicateurs globaux
+    if DUPLICATES_INFO:
+        synth_dups = [
+            ('Doublons (lignes complètes)', DUPLICATES_INFO.get('nb_doublons_lignes', 0)),
+            ("Doublons (identifiant)", DUPLICATES_INFO.get('nb_doublons_identifiant', 0)),
+            ("Doublons (clé composite)", DUPLICATES_INFO.get('nb_doublons_cle_composite', 0)),
+        ]
+        for label, val in synth_dups:
+            rows_indic += f"<tr><td>{label}</td><td>{val}</td></tr>"
     sections = []
+    # Descriptions des tableaux (inline)
+    table_desc = {
+        'repartition_par_acte': (
+            "Ce tableau dresse un panorama des actes médicaux en rapprochant montants engagés et fréquence. "
+            "Il permet d'identifier rapidement les catégories qui structurent la dépense et d'alimenter des pistes d'action : prévention ciblée, renégociation ou contrôle approfondi."
+        ),
+        'repartition_par_centre': (
+            "Nous observons ici la contribution financière et opérationnelle de chaque centre partenaire. "
+            "La lecture croisée montants / nombre de prestations aide à distinguer les structures à forte intensité financière de celles à forte intensité d'actes, deux profils justifiant des approches de pilotage différentes."
+        ),
+        'repartition_par_region': (
+            "La vue régionale met en évidence la distribution géographique des remboursements. "
+            "Elle sert de premier niveau pour repérer des déséquilibres territoriaux, une concentration inattendue ou des zones nécessitant un renforcement de l'offre."
+        ),
+        'repartition_par_province': (
+            "Le détail par province affine l'analyse territoriale. "
+            "En descendant d'un niveau, on valide si les écarts régionaux proviennent d'un noyau restreint de provinces ou d'un phénomène généralisé."
+        ),
+        'repartition_par_type': (
+            "Les grandes familles d'actes sont ici agrégées pour offrir une lecture synthétique. "
+            "Cette hiérarchisation facilite la priorisation des segments à surveiller avant d'entrer dans le détail des sous‑types."
+        ),
+        'repartition_par_sous_type': (
+            "Les sous‑types précisent les dynamiques internes à chaque famille. "
+            "On identifie les niches coûteuses ou en croissance qui pourraient nécessiter des protocoles, un encadrement tarifaire ou une action de sensibilisation."
+        ),
+        'repartition_par_statut': (
+            "La distribution des statuts renseigne sur la qualité du processus de traitement. "
+            "Un niveau élevé de rejets ou d'états intermédiaires orienterait vers des améliorations de saisie, formation ou contrôles."
+        ),
+        'evolution_mensuelle_tableau': (
+            "Le détail mois par mois assure traçabilité et cohérence avec les graphiques. "
+            "Il sert aussi de base à toute extrapolation budgétaire ou simulation prospective simple."
+        ),
+        'evolution_trimestrielle_tableau': (
+            "La consolidation trimestrielle atténue les fluctuations accidentelles et rend lisibles les inflexions structurelles. "
+            "Elle est adaptée aux présentations de synthèse destinées à la gouvernance."
+        )
+    }
     # Tableaux principaux
     header_first_map = {
         'repartition_par_acte': 'Acte',
         'repartition_par_centre': 'Centre de santé',
         'repartition_par_region': 'Région',
-        'repartition_par_province': 'Province',  # Province + Région handled separately
+        'repartition_par_province': 'Province',  # Province + Région handled séparément
         'repartition_par_type': 'Type',
         'repartition_par_sous_type': 'Sous-type',
         'repartition_par_statut': 'Statut'
@@ -911,10 +1076,11 @@ def generer_rapport_html(global_indic: dict, reps: dict, evo: pd.DataFrame, comp
                 last_region = None
                 region_counts = dfp['Region'].value_counts()
                 region_rowspans = region_counts.to_dict()
+                num = 1
                 for _, r in dfp.iterrows():
                     region = r['Region']
                     province = r['Province']
-                    row_cells = [f"<td>{province}</td>"]
+                    row_cells = [f"<td>{num}</td>", f"<td>{province}</td>"]
                     if region != last_region:
                         rowspan = region_rowspans.get(region,1)
                         row_cells.append(f"<td rowspan='{rowspan}' style='font-weight:600;background:#f9f9f9;'>{region}</td>")
@@ -922,23 +1088,27 @@ def generer_rapport_html(global_indic: dict, reps: dict, evo: pd.DataFrame, comp
                     for met_col in metric_cols:
                         row_cells.append(f"<td>{r[met_col]}</td>")
                     rows_html.append('<tr>' + ''.join(row_cells) + '</tr>')
-                header = '<tr><th>Province</th><th>Région</th>' + ''.join(f'<th>{COL_LABELS.get(c,c)}</th>' for c in metric_cols) + '</tr>'
+                    num += 1
+                header = '<tr><th>Numéro</th><th>Province</th><th>Région</th>' + ''.join(f'<th>{COL_LABELS.get(c,c)}</th>' for c in metric_cols) + '</tr>'
                 html_table_inner = f"<table class='tbl'><thead>{header}</thead><tbody>{''.join(rows_html)}</tbody></table>"
                 html_table = f"<div class='scroll-box'>{html_table_inner}</div>" if original_len>20 else html_table_inner
-                sections.append(f"<h3>{key.replace('repartition_par_', 'Répartition par ').replace('_',' ').title()}</h3>{html_table}")
+                titre_tbl = key.replace('repartition_par_', 'Répartition par ').replace('_',' ').title()
+                desc = table_desc.get(key, '')
+                intro = f"<p class='expl'>{desc}</p>" if desc else ''
+                sections.append(f"<h3>{titre_tbl}</h3>{intro}{html_table}")
                 continue
             else:
                 # Table simple (toutes lignes) avec scroll si >20 et en-tête personnalisé
                 # Remonter l'index en colonne pour contrôler l'en-tête
-                if isinstance(tbl_fmt, pd.DataFrame) and tbl_fmt.index.name is not None:
+                if isinstance(tbl_fmt, pd.DataFrame):
                     tbl_fmt = tbl_fmt.reset_index()
-                elif isinstance(tbl_fmt, pd.DataFrame) and tbl_fmt.index.name is None:
-                    # Index sans nom -> créer colonne générique puis renommer
-                    tbl_fmt = tbl_fmt.reset_index()
-                # Renommer première colonne avec label spécifique
-                if isinstance(tbl_fmt, pd.DataFrame) and len(tbl_fmt.columns):
-                    first_col = tbl_fmt.columns[0]
-                    tbl_fmt.rename(columns={first_col: header_first_map.get(key, first_col)}, inplace=True)
+                    # Ajout colonne Numéro sauf statut
+                    if key != 'repartition_par_statut':
+                        tbl_fmt.insert(0, 'Numéro', range(1, len(tbl_fmt) + 1))
+                    # Renommer colonne catégorie (juste après Numéro si présente)
+                    cat_col_idx = 1 if 'Numéro' in tbl_fmt.columns else 0
+                    cat_col = tbl_fmt.columns[cat_col_idx]
+                    tbl_fmt.rename(columns={cat_col: header_first_map.get(key, cat_col)}, inplace=True)
                 # Construire manuellement la table HTML pour éviter double ligne d'en-tête
                 headers = ''.join(f'<th>{h}</th>' for h in tbl_fmt.columns)
                 body_rows = []
@@ -947,9 +1117,167 @@ def generer_rapport_html(global_indic: dict, reps: dict, evo: pd.DataFrame, comp
                     body_rows.append(f'<tr>{cells}</tr>')
                 html_table_inner = f"<table class='tbl'><thead><tr>{headers}</tr></thead><tbody>{''.join(body_rows)}</tbody></table>"
                 html_table = f"<div class='scroll-box'>{html_table_inner}</div>" if original_len>20 else html_table_inner
-                titre = key.replace('repartition_par_', 'Répartition par ').replace('_', ' ').title()
-                sections.append(f'<h3>{titre}</h3>{html_table}')
-    imgs_html = '\n'.join(_img_tag_from_path(p) for p in images_paths)
+                if key == 'repartition_par_statut':
+                    titre = 'Répartition par statut de traitement'
+                else:
+                    titre = key.replace('repartition_par_', 'Répartition par ').replace('_', ' ').title()
+                desc = table_desc.get(key, '')
+                intro = f"<p class='expl'>{desc}</p>" if desc else ''
+                sections.append(f'<h3>{titre}</h3>{intro}{html_table}')
+
+    # Tableau d'évolution mensuelle (en plus du graphique)
+    if isinstance(evo, pd.DataFrame) and not evo.empty:
+        evo_tbl = evo.copy()
+        # Normaliser index en colonne Mois
+        if evo_tbl.index.name is None:
+            evo_tbl = evo_tbl.reset_index().rename(columns={'index': 'Mois'})
+        else:
+            evo_tbl = evo_tbl.reset_index().rename(columns={evo_tbl.index.name: 'Mois'})
+        # Reformater 'Mois' en libellés français complets (ex: janvier 2024)
+        try:
+            # evo a des clés type '2024-01'; parser
+            def _fmt_month(m):
+                try:
+                    dt = pd.Period(m, freq='M').to_timestamp()
+                except Exception:
+                    return m
+                mois_fr = ['janvier','février','mars','avril','mai','juin','juillet','août','septembre','octobre','novembre','décembre'][dt.month-1]
+                return f"{mois_fr} {dt.year}"
+            evo_tbl['Mois'] = evo_tbl['Mois'].apply(_fmt_month)
+        except Exception:
+            pass
+        # Formater colonnes numériques
+        for col in evo_tbl.columns:
+            if col.lower().startswith('montant') or col in {'montant_total','sum'}:
+                evo_tbl[col] = evo_tbl[col].apply(lambda x: fmt(x))
+            elif col in {'nb_prestations','count'}:
+                evo_tbl[col] = evo_tbl[col].apply(lambda x: fmt(x))
+        # Ajouter Numéro
+        evo_tbl.insert(0, 'Numéro', range(1, len(evo_tbl) + 1))
+        # Renommer colonnes pour affichage pro
+        evo_tbl.rename(columns={'montant_total': 'Montant total', 'nb_prestations': 'Nombre de prestations'}, inplace=True)
+        headers = ''.join(f"<th>{h}</th>" for h in evo_tbl.columns)
+        body_rows = []
+        for _, r in evo_tbl.iterrows():
+            cells = ''.join(f"<td>{r[c]}</td>" for c in evo_tbl.columns)
+            body_rows.append(f"<tr>{cells}</tr>")
+        html_table_inner = f"<table class='tbl'><thead><tr>{headers}</tr></thead><tbody>{''.join(body_rows)}</tbody></table>"
+        html_table = f"<div class='scroll-box'>{html_table_inner}</div>" if len(evo_tbl) > 20 else html_table_inner
+    desc = table_desc.get('evolution_mensuelle_tableau','')
+    intro = f"<p class='expl'>{desc}</p>" if desc else ''
+    sections.append(f"<h3>Évolution mensuelle (tableau)</h3>{intro}{html_table}")
+
+    # Tableau d'évolution trimestrielle
+    if isinstance(evo, pd.DataFrame) and not evo.empty:
+        # Reconstituer trimestre à partir de la période mensuelle
+        try:
+            evo_q = evo.copy()
+            evo_q = evo_q.reset_index().rename(columns={evo_q.index.name or 'index': 'Mois'})
+            # Convertir en période mensuelle puis en trimestre
+            def _to_q(m):
+                try:
+                    p = pd.Period(m, freq='M')
+                    q = p.asfreq('Q')
+                    # Format Q1 2024 -> T1 2024
+                    return f"T{q.quarter} {q.year}"
+                except Exception:
+                    return m
+            evo_q['Trimestre'] = evo_q['Mois'].apply(_to_q)
+            q_agg = evo_q.groupby('Trimestre')[['montant_total','nb_prestations']].sum().reset_index()
+            # Trier par année/trimestre chronologiquement
+            def _sort_key(t):
+                try:
+                    parts = t.split()
+                    q = int(parts[0][1:])
+                    y = int(parts[1])
+                    return (y, q)
+                except Exception:
+                    return (9999, 99)
+            q_agg = q_agg.sort_values(key=lambda s: s.apply(_sort_key))
+            # Formater
+            q_agg.insert(0, 'Numéro', range(1, len(q_agg)+1))
+            for col in ['montant_total','nb_prestations']:
+                if col in q_agg.columns:
+                    q_agg[col] = q_agg[col].apply(lambda x: fmt(x))
+            q_agg.rename(columns={'montant_total':'Montant total','nb_prestations':'Nombre de prestations'}, inplace=True)
+            headers_q = ''.join(f"<th>{h}</th>" for h in q_agg.columns)
+            body_rows_q = []
+            for _, r in q_agg.iterrows():
+                cells = ''.join(f"<td>{r[c]}</td>" for c in q_agg.columns)
+                body_rows_q.append(f"<tr>{cells}</tr>")
+            html_table_inner_q = f"<table class='tbl'><thead><tr>{headers_q}</tr></thead><tbody>{''.join(body_rows_q)}</tbody></table>"
+            html_table_q = f"<div class='scroll-box'>{html_table_inner_q}</div>" if len(q_agg) > 20 else html_table_inner_q
+            desc_q = table_desc.get('evolution_trimestrielle_tableau','')
+            intro_q = f"<p class='expl'>{desc_q}</p>" if desc_q else ''
+            sections.append(f"<h3>Évolution trimestrielle (tableau)</h3>{intro_q}{html_table_q}")
+        except Exception:
+            pass
+    # Construction des blocs graphiques avec description inline
+    graph_desc = {
+        'montant_par_acte': (
+            "Montant total par acte",
+            "Ce graphique hiérarchise les actes selon leur poids financier. Il met immédiatement en relief les leviers potentiels où une action ciblée (prévention, protocole, renégociation) aurait l'impact le plus sensible."
+        ),
+        'montant_par_acte_pie': (
+            "Répartition des montants par acte",
+            "La part relative de chaque acte confirme ou nuance la concentration observée. Une forte polarisation incite à analyser les déterminants cliniques ou organisationnels de ces catégories dominantes."
+        ),
+        'top10_centres': (
+            "Top 10 centres – montants",
+            "La concentration financière par centre éclaire les priorités de dialogue et d'audit. Les structures en tête reflètent soit un volume important d'actes lourds soit une spécialisation coûteuse."
+        ),
+        'top10_centres_nbp': (
+            "Top 10 centres – nombre de prestations",
+            "La dynamique d'activité (fréquence) peut différer de la dynamique financière. Identifier ce décalage aide à ajuster l'allocation des contrôles ou des conventions."
+        ),
+        'top10_partenaires': (
+            "Top 10 partenaires – montants",
+            "Les partenaires externes majeurs représentent des points de dépendance opérationnelle. Leur suivi permet d'anticiper tout risque de rupture ou de dérive tarifaire."
+        ),
+        'top10_partenaires_nbp': (
+            "Top 10 partenaires – nombre de prestations",
+            "Un partenaire très sollicité en nombre d'actes mais modeste en montant peut être un pivot logistique (soins courants) à préserver en termes de qualité et de fluidité."
+        ),
+        'top10_adherents_montant': (
+            "Top 10 adhérents – montants",
+            "La concentration sur quelques adhérents peut révéler des pathologies chroniques ou des parcours complexes. Elle suggère des actions de prévention ou de coordination renforcée."
+        ),
+        'repartition_statut_pie': (
+            "Répartition par statut de traitement",
+            "La ventilation des statuts sert de baromètre du processus administratif. Un niveau anormal de rejets ou d'états temporaires déclenche une vérification de la chaîne de saisie et validation."
+        ),
+        'evolution_mensuelle': (
+            "Évolution mensuelle – graphique",
+            "La combinaison barres (nombre) et courbe (montant) met en évidence divergences : hausse de coût sans hausse d'actes ou inversement. Ces inflexions guident les analyses causales."
+        ),
+        'evolution_trimestrielle': (
+            "Évolution trimestrielle – graphique",
+            "La vision lissée confirme si les variations récentes constituent un signal durable ou un bruit ponctuel."
+        ),
+        'repartition_region_montant_nombre': (
+            "Répartition géographique – régions",
+            "Comparer activité et charge financière par région révèle des profils distincts (intensité de recours vs coût moyen)."
+        ),
+        'repartition_province_montant_nombre': (
+            "Répartition géographique – provinces",
+            "Le niveau provincial précise les foyers locaux à suivre, notamment quand une région est hétérogène."
+        ),
+        'pareto_actes': (
+            "Courbe de Pareto des actes",
+            "La courbe cumulative illustre la part de dépense expliquée par un noyau restreint d'actes. Elle justifie une segmentation prioritaire pour optimiser l'effort de gestion."
+        ),
+        'scatter_types': (
+            "Dispersion actes (montant moyen vs fréquence)",
+            "La matrice fréquence / montant moyen positionne les actes : ceux combinant coût unitaire élevé et fréquence notable représentent la zone critique d'optimisation."
+        )
+    }
+    graph_blocks = []
+    for p in images_paths:
+        stem = p.stem
+        titre, desc = graph_desc.get(stem, (stem.replace('_',' ').title(), "Graphique de suivi."))
+        img_tag = _img_tag_from_path(p)
+        graph_blocks.append(f"<div class='visu'><h3>{titre}</h3><p class='expl'>{desc}</p>{img_tag}</div>")
+    imgs_html = '\n'.join(graph_blocks)
     objectifs_html = """
     <section>
         <h2>Objectif de l’analyse</h2>
@@ -961,22 +1289,41 @@ def generer_rapport_html(global_indic: dict, reps: dict, evo: pd.DataFrame, comp
         </ul>
     </section>
     """
-    explications_html = """
+    explications_html = ""  # remplacé par descriptions inline
+    # Section Traitement des données
+    montant_paye = global_indic.get('montant_paye_total', '')
+    montant_non_paye = global_indic.get('montant_non_paye', '')
+    pct_paye = global_indic.get('pourcentage_paye_pct', '')
+    nb_dates_corr = 0
+    if 'DATES_CORRIGEES_DF' in globals() and DATES_CORRIGEES_DF is not None:
+        nb_dates_corr = len(DATES_CORRIGEES_DF)
+    traitement_rows = []
+    def _fmt_brut(v):
+        if isinstance(v,(int,float)) and not isinstance(v,bool):
+            if float(v).is_integer():
+                return f"{int(v):,}".replace(',', ' ')
+            return f"{v:,.2f}".replace(',', ' ').replace('.', ',')
+        return v
+    # (Montant payé / non payé retirés sur demande)
+    if nb_dates_corr:
+        traitement_rows.append(f"<tr><td>Dates corrigées (août–déc. 2025 =&gt; 2024)</td><td>{nb_dates_corr}</td></tr>")
+    if DUPLICATES_INFO:
+        traitement_rows.append(f"<tr><td>Lignes doublons supprimées</td><td>{DUPLICATES_INFO.get('nb_doublons_lignes',0)}</td></tr>")
+    traitement_html = f"""
     <section>
-        <h2>4. Notes & Explications</h2>
-        <p><strong>Notation</strong> : 1 877 340 (124) = montant total 1&nbsp;877&nbsp;340 et 124 prestations (le nombre entre parenthèses).</p>
-        <p><strong>Abréviations montants</strong> : 12,3 k = 12&nbsp;300 ; 1,45 M = 1&nbsp;450&nbsp;000 ; 2,10 Md = 2&nbsp;100&nbsp;000&nbsp;000.</p>
-        <ul>
-            <li><em>Montant total par acte</em> : identifie les types d'actes (consultations, examens, imagerie, pharmacie...) les plus coûteux.</li>
-            <li><em>Répartition des montants par acte</em> : part relative de chaque type d'acte dans le total remboursé.</li>
-            <li><em>Top 10 centres (montant / nombre)</em> : centres avec les montants remboursés les plus élevés et/ou le plus grand nombre de prestations.</li>
-            <li><em>Top 10 partenaires</em> : partenaires avec les montants remboursés les plus élevés et/ou le plus grand nombre de prestations.</li>
-            <li><em>Répartition par statut</em> : proportion des prestations acceptées vs autres.</li>
-            <li><em>Région / Province</em> : concentration géographique des montants.</li>
-            <li><em>Évolution mensuelle</em> : barres = nombre de prestations, ligne = montant total (annotations abrégées).</li>
-            <li><em>Évolution trimestrielle</em> : tendance consolidée par trimestre.</li>
-            <li><em>Top 10 adhérents (montant)</em> : concentration des remboursements sur certains adhérents.</li>
-        </ul>
+      <h2>1. Traitement des données</h2>
+      <p>Opérations appliquées avant analyse :</p>
+      <ul>
+        <li>Normalisation des noms de colonnes / centres (majuscules, espaces).</li>
+        <li>Conversion des dates, filtrage sur 2024–2025.</li>
+        <li>Correction : toutes les dates d'août à décembre 2025 ont leur année remplacée par 2024.</li>
+        <li>Nettoyage des montants (espaces / séparateurs) et conversion numérique.</li>
+        <li>Renommage de « validite » en « statut » + uniformisation (minuscules).</li>
+        <li>Suppression des doublons (lignes identiques) après extraction vers feuilles dédiées.</li>
+        <li>Calcul montants payés : somme des montants où statut ∈ {"accepté","accepte"}; non payé = total - payé.</li>
+      </ul>
+      <table class='tbl'><thead><tr><th>Élément</th><th>Valeur</th></tr></thead><tbody>{''.join(traitement_rows) if traitement_rows else '<tr><td>(aucun)</td><td>-</td></tr>'}</tbody></table>
+    <!-- Ligne de formules supprimée sur demande -->
     </section>
     """
     # Logo base64 si dispo
@@ -1012,12 +1359,13 @@ details summary{{cursor:pointer;font-weight:600;margin:6px 0;}}
 </style></head><body>
 <div style='overflow:auto;'> {logo_html}<h1 style='margin-top:10px;'>Rapport Analytique des Prestations</h1></div>
 {objectifs_html}
-{explications_html}
-<h2>1. Indicateurs Globaux</h2>
+{traitement_html}
+<h2>3. Indicateurs globaux</h2>
+<p class='expl'>Tableau de synthèse générale (périmètre, dispersion, volumes et période d'observation) servant de point d'entrée à l'analyse.</p>
 <table class='tbl'><thead><tr><th>Indicateur</th><th>Valeur</th></tr></thead><tbody>{rows_indic}</tbody></table>
-<h2>2. Visualisations</h2>
+<h2>4. Graphiques analytiques</h2>
 <div class='grid'>{imgs_html}</div>
-<h2>3. Tableaux de Répartition</h2>
+<h2>5. Tableaux de répartition détaillés</h2>
 {''.join(sections)}
 <hr style='margin:40px 0 15px;border:none;border-top:1px solid #ccc;'>
 <footer style='text-align:center;font-size:13px;color:#555;font-style:italic;'>
