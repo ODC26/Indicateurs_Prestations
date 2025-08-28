@@ -28,9 +28,19 @@ try:
 except ImportError:  # fpdf2 non installé
     _HAS_FPDF = False
 
+try:
+    from docx import Document
+    from docx.shared import Inches
+    _HAS_DOCX = True
+except Exception as e:
+    print(f"[DEBUG] Import docx échoué: {e}")
+    _HAS_DOCX = False
+print(f"[DEBUG] python-docx disponible: {_HAS_DOCX}")
+
 SOURCE_FILE = 'Classeur1.xlsx'
 OUTPUT_EXCEL = 'rapport_prestations_complet.xlsx'
 OUTPUT_PDF = 'rapport_prestations.pdf'
+OUTPUT_DOCX = 'rapport_prestations.docx'
 FIG_DIR = Path('figures')
 FIG_DIR.mkdir(exist_ok=True)
 LOGO_PATH = Path('logo_mupol.png')  # placer votre logo ici (PNG/JPG)
@@ -43,6 +53,7 @@ PDF_PERMISSIONS = ['print']        # ex: ['print', 'copy']
 DUPLICATES_INFO: dict = {}
 # Lignes dont les dates ont été corrigées (postérieures à juillet 2025 -> année 2024)
 DATES_CORRIGEES_DF: pd.DataFrame | None = None
+LAST_HTML_REPORT: str | None = None  # stocke le dernier HTML généré pour export Word
 
 # Style global
 sns.set_theme(style='whitegrid', context='talk', palette='Set2')
@@ -873,6 +884,36 @@ def export_pdf(global_indic: dict, reps: dict, images_paths, evo: pd.DataFrame, 
                 line = test
         if line.strip():
             pdf.cell(0, 5, _sanitize(line.rstrip()), ln=1)
+    # Conclusion
+    pdf.ln(3)
+    pdf.set_font(base_font, 'B', 12)
+    pdf.cell(0, 8, _sanitize('5. Conclusion'), ln=1)
+    pdf.set_font(base_font, '', 9)
+    conclusion_text = (
+        "Cette analyse a permis de transformer des données brutes en une lecture stratégique, mettant en lumière les principaux contributeurs aux dépenses, "
+        "les déséquilibres potentiels et les tendances d’évolution. Les constats dégagés ouvrent la voie à des actions concrètes : renforcer la maîtrise médico-financière, cibler les audits, "
+        "optimiser les partenariats et anticiper les risques. L’enjeu est désormais de traduire ces enseignements en décisions opérationnelles afin de soutenir la soutenabilité du régime et d’outiller la gouvernance dans son pilotage stratégique." )
+    # Normalisation de certains caractères pouvant poser problème de largeur / encodage
+    conclusion_text = (conclusion_text
+                       .replace('\u00A0', ' ')
+                       .replace('\u202F', ' ')
+                       .replace('\u2011', '-')  # trait d'union insécable
+                       .replace('\u2013', '-')  # tiret demi-cadrat
+                       .replace('\u2014', '-')  # tiret cadrat
+                      )
+    # Wrap conclusion (algorithme manuel similaire aux puces pour éviter l'exception fpdf"Not enough horizontal space")
+    max_w = pdf.w - pdf.l_margin - pdf.r_margin
+    words = conclusion_text.split()
+    line = ''
+    for w in words:
+        candidate = (line + ' ' + w).strip()
+        if pdf.get_string_width(_sanitize(candidate)) > max_w and line:
+            pdf.cell(0, 5, _sanitize(line.rstrip()), ln=1)
+            line = w
+        else:
+            line = candidate
+    if line.strip():
+        pdf.cell(0, 5, _sanitize(line.rstrip()), ln=1)
     pdf.output(OUTPUT_PDF)
     print(f"Export PDF: {OUTPUT_PDF}")
 
@@ -1023,6 +1064,7 @@ def main():
         pass
     generer_rapport_html(global_indic, reps, evo, comp_t1, images_paths)
     export_pdf(global_indic, reps, images_paths, evo, comp_t1)
+    export_word(global_indic, reps, evo, comp_t1, images_paths)
 
     print('--- Résumé ---')
     for k, v in global_indic.items():
@@ -1041,6 +1083,172 @@ def _img_tag_from_path(path: Path) -> str:
         return f'<img src="data:image/png;base64,{b64}" alt="{path.stem}" style="max-width:100%;height:auto;" />'
     except Exception as e:
         return f'<p>Image {path} indisponible ({e})</p>'
+
+def export_word(global_indic: dict, reps: dict, evo: pd.DataFrame, comp_t1: pd.DataFrame, images_paths):
+    """Export Word en répliquant l'ordre et la structure du HTML (sections, titres, tableaux, figures)."""
+    if not _HAS_DOCX:
+        print("python-docx non installé -> export Word ignoré.")
+        return
+    # Re-générer le HTML ou réutiliser celui déjà stocké
+    global LAST_HTML_REPORT
+    if LAST_HTML_REPORT is None:
+        generer_rapport_html(global_indic, reps, evo, comp_t1, images_paths)
+    html_text = LAST_HTML_REPORT or ''
+    try:
+        # Tentative BeautifulSoup puis fallback lxml
+        parser_used = 'bs4'
+        try:
+            from bs4 import BeautifulSoup  # type: ignore
+            soup = BeautifulSoup(html_text, 'html.parser')
+        except Exception:
+            import lxml.html  # type: ignore
+            parser_used = 'lxml'
+            soup = lxml.html.fromstring(html_text)
+        doc = Document()
+        # Ajout titre global si présent
+        def plain(text: str):
+            return text.replace('\u00a0',' ').strip()
+        # Fonctions utilitaires (versions bs4 / lxml unifiées via attributs)
+        def iter_body_children():
+            if parser_used == 'bs4':
+                for child in soup.body.children:
+                    if getattr(child, 'name', None):
+                        yield child
+            else:
+                body = soup.find('body') if hasattr(soup,'find') else None
+                body = body or soup
+                for child in body.getchildren():
+                    yield child
+        def get_name(el):
+            return getattr(el,'name', None) if parser_used=='bs4' else el.tag
+        def get_text(el):
+            return el.get_text(strip=True) if parser_used=='bs4' else ''.join(el.itertext()).strip()
+        def children(el):
+            if parser_used=='bs4':
+                for c in el.children:
+                    if getattr(c,'name',None):
+                        yield c
+            else:
+                for c in el.getchildren():
+                    yield c
+        def find_all(el, tags):
+            if parser_used=='bs4':
+                return el.find_all(tags, recursive=False)
+            else:
+                return [c for c in el.getchildren() if c.tag in tags]
+        def add_heading(txt, level):
+            if not txt: return
+            if level==0:
+                doc.add_heading(txt, 0)
+            else:
+                doc.add_heading(txt, level=level)
+        def render_table(el):
+            rows = []
+            if parser_used=='bs4':
+                for r in el.find_all('tr'):
+                    rows.append([plain(c.get_text()) for c in r.find_all(['th','td'])])
+            else:
+                for r in el.findall('.//tr'):
+                    cells = []
+                    for c in r.findall('./th') + r.findall('./td'):
+                        cells.append(plain(''.join(c.itertext())))
+                    if cells:
+                        rows.append(cells)
+            if not rows: return
+            ncols = max(len(r) for r in rows)
+            tbl = doc.add_table(rows=1, cols=ncols)
+            for j, val in enumerate(rows[0]):
+                tbl.rows[0].cells[j].text = val
+            for r in rows[1:]:
+                row = tbl.add_row().cells
+                for j, val in enumerate(r):
+                    row[j].text = val
+        import base64, tempfile
+        def render_img(el):
+            src = el.get('src') if parser_used!='bs4' else el.get('src','')
+            if not src: return
+            try:
+                if src.startswith('data:image'):
+                    b64 = src.split(',',1)[1]
+                    data = base64.b64decode(b64)
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
+                        tmp.write(data)
+                        tmp.flush()
+                        doc.add_picture(tmp.name, width=Inches(5.5))
+                elif Path(src).exists():
+                    doc.add_picture(src, width=Inches(5.5))
+            except Exception:
+                pass
+        def render_figure(fig):
+            # image
+            if parser_used=='bs4':
+                img = fig.find('img')
+                if img:
+                    render_img(img)
+                cap = fig.find('figcaption')
+                if cap:
+                    p = doc.add_paragraph(plain(cap.get_text()))
+                    p.italic = True
+            else:
+                img = fig.find('.//img')
+                if img is not None:
+                    render_img(img)
+                cap = fig.find('.//figcaption')
+                if cap is not None:
+                    p = doc.add_paragraph(plain(''.join(cap.itertext())))
+                    p.italic = True
+        # Parcours
+        for node in iter_body_children():
+            name = get_name(node)
+            if name in {'h1','h2','h3'}:
+                lvl = {'h1':0,'h2':1,'h3':2}[name]
+                add_heading(get_text(node), lvl)
+            elif name == 'p':  # paragraphes de premier niveau (ex: explication indicateurs globaux)
+                txt = get_text(node)
+                if txt:
+                    doc.add_paragraph(txt)
+            elif name == 'table':  # tableau indicateurs globaux
+                render_table(node)
+            elif name == 'figure':
+                render_figure(node)
+            elif name == 'section':
+                # parcourir contenu dans l'ordre
+                for ch in children(node):
+                    cname = get_name(ch)
+                    if cname in {'h1','h2','h3'}:
+                        add_heading(get_text(ch), {'h1':0,'h2':1,'h3':2}[cname])
+                    elif cname == 'p':
+                        txt = get_text(ch)
+                        if txt: doc.add_paragraph(txt)
+                    elif cname in {'ul','ol'}:
+                        li_tags = find_all(ch, ['li']) if parser_used!='bs4' else ch.find_all('li', recursive=False)
+                        for li in li_tags:
+                            style = 'List Number' if cname=='ol' else 'List Bullet'
+                            doc.add_paragraph(get_text(li), style=style)
+                    elif cname == 'table':
+                        render_table(ch)
+                    elif cname == 'figure':
+                        render_figure(ch)
+                    else:
+                        # scan sous-éléments potentiels table/figure
+                        if cname == 'div':
+                            for sub in children(ch):
+                                sname = get_name(sub)
+                                if sname == 'table':
+                                    render_table(sub)
+                                elif sname == 'figure':
+                                    render_figure(sub)
+        # Sauvegarde avec fallback si verrou
+        try:
+            doc.save(OUTPUT_DOCX)
+        except PermissionError:
+            alt = OUTPUT_DOCX.replace('.docx', f"_{datetime.now().strftime('%H%M%S')}.docx")
+            doc.save(alt)
+            print(f"Export Word verrouillé, sauvegarde alternative: {alt}")
+        else:
+            print(f"Export Word: {OUTPUT_DOCX}")
+    except Exception as e:
+        print(f"Erreur export Word: {e}")
 
 def generer_rapport_html(global_indic: dict, reps: dict, evo: pd.DataFrame, comp_t1: pd.DataFrame, images_paths):
     def fmt(v):
@@ -1594,6 +1802,10 @@ details summary{{cursor:pointer;font-weight:600;margin:6px 0;}}
 <h2>4. Analyses détaillées</h2>
 {unified_html}
 <hr style='margin:40px 0 15px;border:none;border-top:1px solid #ccc;'>
+<section>
+    <h2>Conclusion</h2>
+    <p>Cette analyse a permis de transformer des données brutes en une lecture stratégique, mettant en lumière les principaux contributeurs aux dépenses, les déséquilibres potentiels et les tendances d’évolution. Les constats dégagés ouvrent la voie à des actions concrètes : renforcer la maîtrise médico-financière, cibler les audits, optimiser les partenariats et anticiper les risques. L’enjeu est désormais de traduire ces enseignements en décisions opérationnelles afin de soutenir la soutenabilité du régime et d’outiller la gouvernance dans son pilotage stratégique.</p>
+</section>
 <footer style='text-align:center;font-size:13px;color:#555;font-style:italic;'>
     <div style='display:flex;align-items:center;justify-content:center;gap:10px;'>
         {footer_logo_html}
@@ -1603,6 +1815,8 @@ details summary{{cursor:pointer;font-weight:600;margin:6px 0;}}
 </body></html>"""
     with open('rapport_prestations.html','w',encoding='utf-8') as f:
         f.write(html)
+    global LAST_HTML_REPORT
+    LAST_HTML_REPORT = html
 
 
 if __name__ == '__main__':
