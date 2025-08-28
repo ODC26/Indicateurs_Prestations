@@ -288,7 +288,7 @@ def _annotate_bars(ax):
                         (p.get_x() + p.get_width()/2, height),
                         ha='center', va='bottom', fontsize=9, rotation=0)
 
-def plot_bar(df_series: pd.Series, title: str, filename: str, top: int | None = None, horizontal=False, pie=False, counts_series: pd.Series | None = None):
+def plot_bar(df_series: pd.Series, title: str, filename: str, top: int | None = None, horizontal=False, pie=False, counts_series: pd.Series | None = None, annotate_vertical: bool = False):
     if df_series.empty:
         return None
     data = df_series.head(top) if top else df_series
@@ -324,15 +324,30 @@ def plot_bar(df_series: pd.Series, title: str, filename: str, top: int | None = 
             ax.set_ylabel('Montant total')
             ax.set_xlabel('')
             # Annotations sur chaque barre
+            max_val = 0
+            for p, idx in zip(ax.patches, data.index):
+                h = p.get_height()
+                if not math.isnan(h):
+                    max_val = max(max_val, h)
+            # Décalage et marge supérieure plus généreux pour éviter débordement
+            y_offset = max_val * 0.03  # léger espace au-dessus de chaque barre
             for p, idx in zip(ax.patches, data.index):
                 height = p.get_height()
-                if not math.isnan(height):
-                    if counts_series is not None and idx in counts_series.index:
-                        c = counts_series.loc[idx]
-                        txt = f"{int(height):,} ({int(c)})".replace(',', ' ')
-                    else:
-                        txt = f"{int(height):,}".replace(',', ' ')
+                if math.isnan(height):
+                    continue
+                if counts_series is not None and idx in counts_series.index:
+                    c = counts_series.loc[idx]
+                    txt = f"{int(height):,} ({int(c)})".replace(',', ' ')
+                else:
+                    txt = f"{int(height):,}".replace(',', ' ')
+                if annotate_vertical:
+                    ax.annotate(txt,
+                                (p.get_x() + p.get_width()/2, height + y_offset),
+                                ha='center', va='bottom', fontsize=8, rotation=90, clip_on=False)
+                else:
                     ax.annotate(txt, (p.get_x() + p.get_width()/2, height), ha='center', va='bottom', fontsize=9)
+            if annotate_vertical and max_val > 0:
+                ax.set_ylim(0, max_val * 1.28)  # marge verticale accrue (28%) pour contenir texte pivoté
         # Rotation dynamique si beaucoup de labels
         if not horizontal:
             rot = 90 if len(data) > 25 else 35
@@ -681,19 +696,19 @@ def export_pdf(global_indic: dict, reps: dict, images_paths, evo: pd.DataFrame, 
             pass
     pdf.set_font(base_font, '', 10)
     pdf.cell(0, 6, _sanitize(f"Généré le {datetime.now().strftime('%d/%m/%Y %H:%M')}"), ln=1)
-    # Objectifs de l'analyse
+    # Synthèse introductive (résumé court des objectifs)
     pdf.set_font(base_font, 'B', 12)
-    pdf.cell(0, 8, _sanitize("Objectif de l'analyse"), ln=1)
+    pdf.cell(0, 8, _sanitize("Introduction & objectifs (résumé)"), ln=1)
     pdf.set_font(base_font, '', 9)
-    objectifs = [
-        _sanitize("Évaluer les dépenses de santé prises en charge par la mutuelle."),
-        _sanitize("Comparer la répartition par actes, centres, partenaires et zones géographiques."),
-        _sanitize("Mesurer la performance du remboursement (taux d'acceptation, paiements effectués)."),
-        _sanitize("Identifier les tendances pour anticiper la charge financière future.")
+    intro_resume = [
+        _sanitize("Période : janv. 2024 – juil. 2025. Analyse des prestations remboursables nettoyées et fiabilisées."),
+        _sanitize("Finalité : fournir une lecture stratégique des volumes, montants, évolutions et concentrations."),
+        _sanitize("Axes : actes, types/sous types, centres, partenaires, zones géographiques, bénéficiaires & genre."),
+        _sanitize("Temporalité : double lecture mensuelle (sensibilité) et trimestrielle (tendance)."),
+        _sanitize("Usage : prioriser audits, prévention, renégociation et pilotage médico‑financier."),
     ]
-    # Rendu manuel des puces (évite erreur largeur sur certains environnements)
     max_w = pdf.w - pdf.l_margin - pdf.r_margin
-    for o in objectifs:
+    for o in intro_resume:
         words = o.split()
         line = "- "
         for w in words:
@@ -913,7 +928,7 @@ def main():
     if 'repartition_par_type' in reps:
         try:
             type_sum = reps['repartition_par_type']['sum']
-            g_type = plot_bar(type_sum, 'Montant total par type', 'montant_par_type.png')
+            g_type = plot_bar(type_sum, 'Montant total par type', 'montant_par_type.png', annotate_vertical=True)
             if g_type: images_paths.append(g_type)
         except Exception:
             pass
@@ -1453,16 +1468,55 @@ def generer_rapport_html(global_indic: dict, reps: dict, evo: pd.DataFrame, comp
 
     unified_html = '\n'.join(unified_blocks)
     objectifs_html = """
-    <section>
-        <h2>Objectif de l’analyse</h2>
-        <ul>
-            <li>Évaluer les dépenses de santé prises en charge par la mutuelle.</li>
-            <li>Comparer la répartition par actes, centres, partenaires et zones géographiques.</li>
-            <li>Mesurer la performance du remboursement (taux d’acceptation, paiements effectués).</li>
-            <li>Identifier les tendances pour anticiper la charge financière future.</li>
-        </ul>
-    </section>
-    """
+        <section>
+            <h2>Introduction générale</h2>
+            <p>Ce rapport analyse en profondeur les prestations de santé prises en charge par la Mutuelle sur la période allant de janvier 2024 à juillet 2025. Il vise à transformer un volume hétérogène de données opérationnelles en lecture stratégique exploitable pour la gouvernance, la maîtrise des risques médico‑financiers et l’orientation des actions correctrices. La progression des charges de santé, la variabilité des pratiques de facturation, la pression budgétaire sur la soutenabilité des régimes solidaires et l’attente de transparence des adhérents imposent un pilotage analytique précis et régulier.</p>
+            <h3>Contexte</h3>
+            <p>La Mutuelle évolue dans un environnement marqué par une progression continue des charges de santé, une variabilité des pratiques de facturation et une pression croissante sur la soutenabilité des régimes solidaires. Dans ce cadre, une analyse approfondie des prestations enregistrées entre janvier 2024 et juillet 2025 s’impose afin de fournir à la gouvernance une lecture claire et fiable des données. Cette démarche répond également à une attente de transparence de la part des adhérents et vise à renforcer le pilotage analytique des risques médico‑financiers.</p>
+            <h3>Objectifs analytiques</h3>
+            <ol>
+                <li>Établir une photographie fiable des volumes, montants globaux, dispersion et coûts unitaires.</li>
+                <li>Hiérarchiser les contributeurs majeurs : actes, types, sous types, centres, partenaires, zones.</li>
+                <li>Déceler les signaux d’évolution : accélérations, inflexions, points de rupture (mensuel & trimestriel).</li>
+                <li>Identifier les poches de concentration (top adhérents, nœuds géographiques, sous types émergents).</li>
+                <li>Apprécier l’équilibre bénéficiaires / genre pour une lecture d’équité d’accès.</li>
+                <li>Évaluer la qualité du flux de traitement via la distribution des statuts.</li>
+                <li>Préparer une base rationnelle pour prioriser audits, renégociations ou actions de prévention ciblées.</li>
+            </ol>
+            <h3>Périmètre et fiabilisation des données</h3>
+            <ul>
+                <li><strong>Inclusion :</strong> prestations remboursables enregistrées (janv. 2024 – juil. 2025).</li>
+                <li><strong>Normalisations :</strong> typographie des centres, homogénéisation des statuts, formats monétaires.</li>
+                <li><strong>Correctif calendaire :</strong> dates août–décembre 2025 rebasculées sur 2024 (anomalie corrigée et tracée).</li>
+                <li><strong>Qualité :</strong> élimination des doublons (extraction conservatoire), contrôle des colonnes critiques, conversion explicite des montants.</li>
+                <li><strong>Exclusions :</strong> pas de modélisation prédictive avancée, ni benchmarking externe, ni analyse médicale qualitative.</li>
+            </ul>
+            <h3>Méthodologie synthétique</h3>
+            <ul>
+                <li>Agrégations multi axes (acte, type, sous type, centre, partenaire, région, province).</li>
+                <li>Mesures descriptives : montants totaux, volumes, moyennes, médianes, dispersion implicite.</li>
+                <li>Répartition relative (camemberts, histogrammes triés) pour traduire la concentration.</li>
+                <li>Lecture temporelle double : mensuelle (sensibilité fine) et trimestrielle (tendance).</li>
+                <li>Segmentation bénéficiaires / genre pour détecter d’éventuels déséquilibres.</li>
+                <li>Visualisations annotées pour réduire l’ambiguïté interprétative.</li>
+            </ul>
+            <h3>Définitions opérationnelles (extraits)</h3>
+            <ul>
+                <li><strong>Montant total :</strong> somme des montants enregistrés.</li>
+                <li><strong>Nombre de prestations :</strong> enregistrements unitaires après nettoyage.</li>
+                <li><strong>Coût moyen par prestation :</strong> montant total / nombre de prestations.</li>
+                <li><strong>Statuts :</strong> catégories de traitement (accepté / autre) harmonisées.</li>
+                <li><strong>Type / sous type :</strong> niveaux hiérarchiques internes de classification.</li>
+            </ul>
+            <h3>Limites et prudences</h3>
+            <ul>
+                <li>Données = historique comptabilisé (non‑recours non mesuré).</li>
+                <li>Pas d’ajustement clinique (complexité / sévérité non intégrées).</li>
+                <li>Montants non ajustés pour inflation intra période.</li>
+                <li>Retards possibles de facturation pouvant lisser certaines hausses.</li>
+            </ul>
+        </section>
+        """
     explications_html = ""  # remplacé par descriptions inline
     # Section Traitement des données
     montant_paye = global_indic.get('montant_paye_total', '')
