@@ -205,7 +205,9 @@ HEADER_FIRST_MAP = {
     'repartition_par_type': 'Type',
     'repartition_par_sous_type': 'Sous-type',
     'repartition_par_statut': 'Statut',
-    'repartition_par_partenaire': 'Partenaire'
+    'repartition_par_partenaire': 'Partenaire',
+    'repartition_par_beneficiaire': 'Bénéficiaire',
+    'repartition_par_genre': 'Genre'
 }
 
 # ------------------ Répartitions ------------------ #
@@ -228,6 +230,8 @@ def repartitions(df: pd.DataFrame) -> dict[str, pd.DataFrame | pd.Series]:
         'repartition_par_sous_type': 'sous_type',
         'repartition_par_centre': next((c for c in df.columns if 'centre' in c.lower()), None),
         'repartition_par_partenaire': next((c for c in df.columns if 'parten' in c.lower()), None),
+        'repartition_par_beneficiaire': next((c for c in df.columns if c.lower() == 'beneficiaire'), None),
+        'repartition_par_genre': next((c for c in df.columns if 'adherent_genre' in c.lower()), None),
         'repartition_par_region': next((c for c in df.columns if c.lower() == 'region'), None),
         'repartition_par_province': None,  # géré séparément via multi-index région+province
         'repartition_par_statut': 'statut'
@@ -288,7 +292,14 @@ def plot_bar(df_series: pd.Series, title: str, filename: str, top: int | None = 
     if df_series.empty:
         return None
     data = df_series.head(top) if top else df_series
-    fig, ax = plt.subplots(figsize=(10,5))
+    # Ajustement dynamique de la largeur pour lisibilité quand beaucoup de catégories verticales
+    if not horizontal and not pie:
+        base_w = 10
+        if len(data) > 25:
+            base_w = min(0.35 * len(data), 30)  # plafonner pour éviter figures énormes
+        fig, ax = plt.subplots(figsize=(base_w, 6))
+    else:
+        fig, ax = plt.subplots(figsize=(10,5))
     if pie:
         total = data.sum()
         percentages = (data / total * 100).round(1)
@@ -322,7 +333,12 @@ def plot_bar(df_series: pd.Series, title: str, filename: str, top: int | None = 
                     else:
                         txt = f"{int(height):,}".replace(',', ' ')
                     ax.annotate(txt, (p.get_x() + p.get_width()/2, height), ha='center', va='bottom', fontsize=9)
-        ax.tick_params(axis='x', rotation=35 if not horizontal else 0)
+        # Rotation dynamique si beaucoup de labels
+        if not horizontal:
+            rot = 90 if len(data) > 25 else 35
+            ax.tick_params(axis='x', rotation=rot)
+        else:
+            ax.tick_params(axis='x', rotation=0)
     ax.set_title(title)
     plt.tight_layout()
     # Bordure carrée
@@ -721,7 +737,7 @@ def export_pdf(global_indic: dict, reps: dict, images_paths, evo: pd.DataFrame, 
         'repartition_par_sous_type': 'Sous-type',
         'repartition_par_statut': 'Statut'
     }
-    for key in ['repartition_par_acte', 'repartition_par_centre', 'repartition_par_region', 'repartition_par_province', 'repartition_par_type', 'repartition_par_sous_type', 'repartition_par_statut']:
+    for key in ['repartition_par_acte', 'repartition_par_centre', 'repartition_par_region', 'repartition_par_province', 'repartition_par_type', 'repartition_par_sous_type', 'repartition_par_statut', 'repartition_par_beneficiaire', 'repartition_par_genre']:
         if key in reps:
             titre = key.replace('repartition_par_', 'Répartition par ').replace('_', ' ').title()
             pdf.set_font(base_font, 'B', 10)
@@ -893,6 +909,35 @@ def main():
     if 'repartition_par_statut' in reps:
         ps = plot_pie_group_small(reps['repartition_par_statut']['count'], 'Répartition des prestations par statut', 'repartition_statut_pie.png', threshold=0.01)
         if ps: images_paths.append(ps)
+    # Histogrammes Type / Sous-type (verticaux pour lisibilité et cohérence)
+    if 'repartition_par_type' in reps:
+        try:
+            type_sum = reps['repartition_par_type']['sum']
+            g_type = plot_bar(type_sum, 'Montant total par type', 'montant_par_type.png')
+            if g_type: images_paths.append(g_type)
+        except Exception:
+            pass
+    if 'repartition_par_sous_type' in reps:
+        try:
+            st_sum = reps['repartition_par_sous_type']['sum'].head(30)  # élargir à top 30 si disponible
+            g_soustype = plot_bar(st_sum, 'Montant total par sous-type (Top 30)', 'montant_par_sous_type.png')
+            if g_soustype: images_paths.append(g_soustype)
+        except Exception:
+            pass
+    # Répartition par bénéficiaire (camembert)
+    if 'repartition_par_beneficiaire' in reps:
+        try:
+            pb = plot_pie_group_small(reps['repartition_par_beneficiaire']['count'], 'Répartition des prestations par bénéficiaire', 'repartition_beneficiaire_pie.png', threshold=0.01)
+            if pb: images_paths.append(pb)
+        except Exception:
+            pass
+    # Répartition par genre (camembert)
+    if 'repartition_par_genre' in reps:
+        try:
+            pg = plot_pie_group_small(reps['repartition_par_genre']['count'], 'Répartition des prestations par genre', 'repartition_genre_pie.png', threshold=0.01)
+            if pg: images_paths.append(pg)
+        except Exception:
+            pass
     # Graphiques région & province
     reg_path = plot_region_distribution(reps)
     if reg_path: images_paths.append(reg_path)
@@ -957,6 +1002,10 @@ def main():
                 images_paths.append(evol_q_path)
 
     export_excel(global_indic, reps, evo, comp_t1, df)
+    try:
+        print('Images générées:', [p.stem for p in images_paths])
+    except Exception:
+        pass
     generer_rapport_html(global_indic, reps, evo, comp_t1, images_paths)
     export_pdf(global_indic, reps, images_paths, evo, comp_t1)
 
@@ -1005,46 +1054,72 @@ def generer_rapport_html(global_indic: dict, reps: dict, evo: pd.DataFrame, comp
         ]
         for label, val in synth_dups:
             rows_indic += f"<tr><td>{label}</td><td>{val}</td></tr>"
-    sections = []
+    sections = []  # legacy list (will be replaced by unified blocks)
+    table_htmls: dict[str, dict] = {}
     # Descriptions des tableaux (inline)
     table_desc = {
         'repartition_par_acte': (
-            "Ce tableau dresse un panorama des actes médicaux en rapprochant montants engagés et fréquence. "
-            "Il permet d'identifier rapidement les catégories qui structurent la dépense et d'alimenter des pistes d'action : prévention ciblée, renégociation ou contrôle approfondi."
+            "Ce tableau offre une lecture structurée des actes médicaux en rapprochant simultanément le poids financier et la fréquence. "
+            "L'objectif est de dégager un noyau d'actes dominants qui concentrent l'effort budgétaire. Une catégorie très coûteuse mais peu fréquente appelle des vérifications qualitatives (pertinence clinique, tarification), tandis qu'une catégorie très fréquente et modérément coûteuse peut devenir prioritaire pour des actions préventives ou de rationalisation. "
+            "Cette double perspective évite de se laisser guider par le seul montant agrégé et prépare les arbitrages ciblés."
         ),
         'repartition_par_centre': (
-            "Nous observons ici la contribution financière et opérationnelle de chaque centre partenaire. "
-            "La lecture croisée montants / nombre de prestations aide à distinguer les structures à forte intensité financière de celles à forte intensité d'actes, deux profils justifiant des approches de pilotage différentes."
+            "Cette répartition éclaire la contribution respective des centres de santé. Elle distingue les sites qui concentrent les montants de ceux qui concentrent l'activité brute. "
+            "Un centre haut en montant mais moyen en volume peut refléter une spécialisation coûteuse (imagerie, hospitalisation complexe) alors qu'un centre élevé en volume mais modeste en montant relève souvent de soins courants nécessitant fluidité et qualité plutôt que négociation tarifaire. "
+            "L'analyse permet de prioriser les visites terrain, audits, ou renégociations contractuelles."
         ),
         'repartition_par_region': (
-            "La vue régionale met en évidence la distribution géographique des remboursements. "
-            "Elle sert de premier niveau pour repérer des déséquilibres territoriaux, une concentration inattendue ou des zones nécessitant un renforcement de l'offre."
+            "La vision régionale sert de filtre macro pour détecter des asymétries territoriales : surreprésentation des dépenses, sous‑utilisation relative ou polarisation géographique. "
+            "Elle permet d'anticiper des tensions locales (saturation, dérives de pratiques) et d'interroger l'équité d'accès. Une région sous‑pondérée en volume mais avec un coût moyen élevé peut indiquer des actes plus lourds ou une offre moins diversifiée. "
+            "Ce diagnostic de premier niveau guide l'examen provincial fin."
         ),
         'repartition_par_province': (
-            "Le détail par province affine l'analyse territoriale. "
-            "En descendant d'un niveau, on valide si les écarts régionaux proviennent d'un noyau restreint de provinces ou d'un phénomène généralisé."
+            "Le passage à l'échelle provinciale précise l'origine réelle des écarts détectés plus haut. "
+            "On vérifie si une région dominante repose sur quelques provinces moteurs ou sur un socle homogène. Cette granularité facilite la mise en place d'actions correctives localisées (sensibilisation, renforcement du réseau, contrôle ciblé). "
+            "Elle évite aussi les généralisations hâtives issues d'agrégats régionaux."
         ),
         'repartition_par_type': (
-            "Les grandes familles d'actes sont ici agrégées pour offrir une lecture synthétique. "
-            "Cette hiérarchisation facilite la priorisation des segments à surveiller avant d'entrer dans le détail des sous‑types."
+            "La catégorisation par grands types agrège suffisamment pour révéler la structure fonctionnelle globale de la dépense sans diluer les signaux forts. "
+            "L'histogramme des montants par type permet de visualiser immédiatement les domaines dominants et de confirmer les priorités d'analyse. "
+            "Ce niveau intermédiaire aide à prioriser : sur quels domaines (externe, pharmacie, hospitalisation…) concentrer les efforts d'analyse détaillée ? "
+            "Il constitue un pivot entre la vision synthétique et le grain fin des sous‑types."
         ),
         'repartition_par_sous_type': (
-            "Les sous‑types précisent les dynamiques internes à chaque famille. "
-            "On identifie les niches coûteuses ou en croissance qui pourraient nécessiter des protocoles, un encadrement tarifaire ou une action de sensibilisation."
+            "Les sous‑types dévoilent les poches précises de dépense ou de dynamisme. "
+            "L'histogramme (Top 15 sous‑types) met en évidence les niches coûteuses masquées au niveau supérieur et oriente les investigations ciblées. "
+            "Ils permettent d'identifier des segments candidats à des protocoles de soins, à une revue tarifaire ou à une action de prévention. Une sous‑catégorie en forte progression relative mérite une surveillance anticipative avant qu'elle ne pèse lourdement sur l'enveloppe. "
+            "Cette granularité est essentielle pour transformer l'observation en plan d'action."
+        ),
+        'repartition_par_partenaire': (
+            "Le tableau des partenaires met en regard le poids financier et le volume traité par chaque entité contractée. "
+            "Il permet d'identifier les relations critiques (forte part du portefeuille), de surveiller les dépendances excessives et de préparer des discussions ciblées sur les pratiques de facturation ou les engagements de service. "
+            "Une concentration élevée justifie un plan de sécurisation (clauses, diversification progressive) tandis qu'une dispersion peut indiquer un réseau équilibré mais plus complexe à piloter."
         ),
         'repartition_par_statut': (
-            "La distribution des statuts renseigne sur la qualité du processus de traitement. "
-            "Un niveau élevé de rejets ou d'états intermédiaires orienterait vers des améliorations de saisie, formation ou contrôles."
+            "La distribution des statuts évalue la performance opérationnelle du flux de traitement. "
+            "Un taux de rejet ou d'état intermédiaire élevé peut résulter d'erreurs de saisie, de pièces justificatives incomplètes ou d'ambiguïtés procédurales. "
+            "Suivre son évolution dans le temps fournit un indicateur indirect d'efficacité interne et de maturité du réseau de prestataires."
         ),
         'evolution_mensuelle_tableau': (
-            "Le détail mois par mois assure traçabilité et cohérence avec les graphiques. "
-            "Il sert aussi de base à toute extrapolation budgétaire ou simulation prospective simple."
+            "Le détail mensuel constitue la base de vérification et de recalcul. "
+            "Il permet de confronter les tendances visuelles à la matérialité des chiffres, de repérer des ruptures (sauts de niveau, creux saisonniers) et de préparer d'éventuelles projections simples (extrapolation linéaire, moyenne glissante). "
+            "Sa structure textuelle (mois en toutes lettres) facilite la communication non technique."
         ),
         'evolution_trimestrielle_tableau': (
-            "La consolidation trimestrielle atténue les fluctuations accidentelles et rend lisibles les inflexions structurelles. "
-            "Elle est adaptée aux présentations de synthèse destinées à la gouvernance."
+            "La consolidation trimestrielle filtre le bruit court terme pour révéler les inflexions structurelles. "
+            "Elle constitue un format adapté aux instances de gouvernance qui privilégient la trajectoire globale (accélération, plateau, repli). "
+            "Ce niveau est aussi pertinent pour aligner budgétairement les anticipations avec la réalité observée."
         )
     }
+    # Ajouts descriptions spécifiques bénéficiaire / genre
+    table_desc['repartition_par_beneficiaire'] = (
+        "Cette ventilation distingue les catégories de bénéficiaires (adhérent principal, ayant droit, etc.) en rapprochant charge financière et fréquence. "
+        "Elle permet de vérifier si une catégorie spécifique pèse de manière disproportionnée et d'orienter des actions de prévention ou d'accompagnement ciblé."
+    )
+    table_desc['repartition_par_genre'] = (
+        "La distribution par genre met en évidence d'éventuelles asymétries de recours. "
+        "Elle constitue un indicateur d'équité et peut déclencher des analyses complémentaires (accès, comportements de soins, pathologies différenciées)."
+    )
     # Tableaux principaux
     header_first_map = {
         'repartition_par_acte': 'Acte',
@@ -1055,7 +1130,7 @@ def generer_rapport_html(global_indic: dict, reps: dict, evo: pd.DataFrame, comp
         'repartition_par_sous_type': 'Sous-type',
         'repartition_par_statut': 'Statut'
     }
-    for key in ['repartition_par_acte','repartition_par_centre','repartition_par_region','repartition_par_province','repartition_par_type','repartition_par_sous_type','repartition_par_statut']:
+    for key in ['repartition_par_acte','repartition_par_centre','repartition_par_partenaire','repartition_par_region','repartition_par_province','repartition_par_type','repartition_par_sous_type','repartition_par_statut','repartition_par_beneficiaire','repartition_par_genre']:
         if key in reps:
             tbl = reps[key].copy()
             tbl_fmt = tbl.copy()
@@ -1095,7 +1170,7 @@ def generer_rapport_html(global_indic: dict, reps: dict, evo: pd.DataFrame, comp
                 titre_tbl = key.replace('repartition_par_', 'Répartition par ').replace('_',' ').title()
                 desc = table_desc.get(key, '')
                 intro = f"<p class='expl'>{desc}</p>" if desc else ''
-                sections.append(f"<h3>{titre_tbl}</h3>{intro}{html_table}")
+                table_htmls[key] = {"title": titre_tbl, "desc": table_desc.get(key,''), "html": html_table}
                 continue
             else:
                 # Table simple (toutes lignes) avec scroll si >20 et en-tête personnalisé
@@ -1123,7 +1198,7 @@ def generer_rapport_html(global_indic: dict, reps: dict, evo: pd.DataFrame, comp
                     titre = key.replace('repartition_par_', 'Répartition par ').replace('_', ' ').title()
                 desc = table_desc.get(key, '')
                 intro = f"<p class='expl'>{desc}</p>" if desc else ''
-                sections.append(f'<h3>{titre}</h3>{intro}{html_table}')
+                table_htmls[key] = {"title": titre, "desc": table_desc.get(key,''), "html": html_table}
 
     # Tableau d'évolution mensuelle (en plus du graphique)
     if isinstance(evo, pd.DataFrame) and not evo.empty:
@@ -1165,7 +1240,7 @@ def generer_rapport_html(global_indic: dict, reps: dict, evo: pd.DataFrame, comp
         html_table = f"<div class='scroll-box'>{html_table_inner}</div>" if len(evo_tbl) > 20 else html_table_inner
     desc = table_desc.get('evolution_mensuelle_tableau','')
     intro = f"<p class='expl'>{desc}</p>" if desc else ''
-    sections.append(f"<h3>Évolution mensuelle (tableau)</h3>{intro}{html_table}")
+    table_htmls['evolution_mensuelle_tableau'] = {"title": 'Évolution mensuelle (tableau)', "desc": table_desc.get('evolution_mensuelle_tableau',''), "html": html_table}
 
     # Tableau d'évolution trimestrielle
     if isinstance(evo, pd.DataFrame) and not evo.empty:
@@ -1209,75 +1284,174 @@ def generer_rapport_html(global_indic: dict, reps: dict, evo: pd.DataFrame, comp
             html_table_q = f"<div class='scroll-box'>{html_table_inner_q}</div>" if len(q_agg) > 20 else html_table_inner_q
             desc_q = table_desc.get('evolution_trimestrielle_tableau','')
             intro_q = f"<p class='expl'>{desc_q}</p>" if desc_q else ''
-            sections.append(f"<h3>Évolution trimestrielle (tableau)</h3>{intro_q}{html_table_q}")
+            table_htmls['evolution_trimestrielle_tableau'] = {"title": 'Évolution trimestrielle (tableau)', "desc": table_desc.get('evolution_trimestrielle_tableau',''), "html": html_table_q}
         except Exception:
             pass
     # Construction des blocs graphiques avec description inline
     graph_desc = {
         'montant_par_acte': (
             "Montant total par acte",
-            "Ce graphique hiérarchise les actes selon leur poids financier. Il met immédiatement en relief les leviers potentiels où une action ciblée (prévention, protocole, renégociation) aurait l'impact le plus sensible."
+            "La hiérarchisation des actes par montant total met immédiatement en évidence les leviers prioritaires. Un pic isolé peut indiquer soit une catégorie réellement consommatrice, soit une dérive (tarif, codage). Le graphique sert donc autant d'instrument de pilotage que de déclencheur d'investigation qualitative. Il prépare la transition vers l'analyse de répartition relative."
         ),
         'montant_par_acte_pie': (
             "Répartition des montants par acte",
-            "La part relative de chaque acte confirme ou nuance la concentration observée. Une forte polarisation incite à analyser les déterminants cliniques ou organisationnels de ces catégories dominantes."
+            "La structure relative des dépenses confirme ou tempère les impressions issues des montants absolus. Une forte concentration sur un petit nombre d'actes renforce la pertinence d'actions focalisées, tandis qu'une dispersion plus homogène appelle des mesures transversales (procédures, prévention globale). Le contraste barre / camembert enrichit le jugement managérial."
         ),
         'top10_centres': (
             "Top 10 centres – montants",
-            "La concentration financière par centre éclaire les priorités de dialogue et d'audit. Les structures en tête reflètent soit un volume important d'actes lourds soit une spécialisation coûteuse."
+            "La concentration financière par centre signale les interlocuteurs clés pour la maîtrise du risque budgétaire. Un centre dominant peut refléter une spécialisation ou une dépendance commerciale. L'analyse aide à calibrer la fréquence des audits, la profondeur des revues médicales et la stratégie de contractualisation."
         ),
         'top10_centres_nbp': (
             "Top 10 centres – nombre de prestations",
-            "La dynamique d'activité (fréquence) peut différer de la dynamique financière. Identifier ce décalage aide à ajuster l'allocation des contrôles ou des conventions."
+            "Le classement en volume distingue les pôles d'activité intense. Comparé au classement financier, il révèle des divergences structurelles (fort volume mais faible panier moyen versus faible volume mais valeur élevée). Cette dissociation oriente différemment les actions : optimisation de flux d'un côté, contrôle des coûts unitaires de l'autre."
         ),
         'top10_partenaires': (
             "Top 10 partenaires – montants",
-            "Les partenaires externes majeurs représentent des points de dépendance opérationnelle. Leur suivi permet d'anticiper tout risque de rupture ou de dérive tarifaire."
+            "Les partenaires externes majeurs forment un périmètre de dépendance critique. Une concentration excessive expose à un risque opérationnel (capacité, rupture) ou tarifaire. La visualisation incite à diversifier ou à sécuriser les accords par clauses adaptées."
         ),
         'top10_partenaires_nbp': (
             "Top 10 partenaires – nombre de prestations",
-            "Un partenaire très sollicité en nombre d'actes mais modeste en montant peut être un pivot logistique (soins courants) à préserver en termes de qualité et de fluidité."
+            "Un partenaire sur‑sollicité en nombre mais modeste en montant est souvent le maillon logistique du parcours de soins courant. Sa performance influence directement l'expérience adhérent et la fluidité des remboursements. Préserver sa qualité devient stratégique."
         ),
         'top10_adherents_montant': (
             "Top 10 adhérents – montants",
-            "La concentration sur quelques adhérents peut révéler des pathologies chroniques ou des parcours complexes. Elle suggère des actions de prévention ou de coordination renforcée."
+            "La concentration sur quelques adhérents oriente vers des suivis individualisés : pathologies chroniques, épisodes lourds, potentiels cas de récurrence évitable. Cette vue nourrit la coordination médicale et les programmes de prévention ciblée à impact durable."
         ),
         'repartition_statut_pie': (
             "Répartition par statut de traitement",
-            "La ventilation des statuts sert de baromètre du processus administratif. Un niveau anormal de rejets ou d'états temporaires déclenche une vérification de la chaîne de saisie et validation."
+            "La ventilation des statuts agit comme un indicateur de santé du processus administratif. Une dérive sur la proportion de dossiers rejetés ou en suspens peut entraîner un allongement des délais perçus et une érosion de confiance. Une baisse progressive des rejets témoigne de la maturité collaborative avec les prestataires."
         ),
         'evolution_mensuelle': (
             "Évolution mensuelle – graphique",
-            "La combinaison barres (nombre) et courbe (montant) met en évidence divergences : hausse de coût sans hausse d'actes ou inversement. Ces inflexions guident les analyses causales."
+            "La combinaison courbe (montant) et barres (nombre) permet de repérer des divergences structurelles : montée des coûts unitaires (montant croît plus vite que le nombre) ou dilution (nombre progresse mais enveloppe stable). Ces signaux précoces permettent d'agir avant que l'effet cumulé ne pèse lourdement sur l'année."
         ),
         'evolution_trimestrielle': (
             "Évolution trimestrielle – graphique",
-            "La vision lissée confirme si les variations récentes constituent un signal durable ou un bruit ponctuel."
+            "Le lissage trimestriel sépare tendance de bruit. Il aide à vérifier si une hausse récente est soutenable (tendance installée) ou transitoire (pic isolé). Cette lecture sert de pont avec les arbitrages budgétaires et les révisions de prévisions."
         ),
         'repartition_region_montant_nombre': (
             "Répartition géographique – régions",
-            "Comparer activité et charge financière par région révèle des profils distincts (intensité de recours vs coût moyen)."
+            "La comparaison croisée des montants et du volume par région éclaire les modèles d'utilisation : forte intensité de recours vs forte valeur unitaire. Elle met en avant des profils contrastés exigeant des réponses distinctes (optimisation de l'accès, contrôle de la lourdeur des actes)."
         ),
         'repartition_province_montant_nombre': (
             "Répartition géographique – provinces",
-            "Le niveau provincial précise les foyers locaux à suivre, notamment quand une région est hétérogène."
+            "Le détail provincial raffine les constats régionaux. Il permet d'isoler les foyers spécifiques de surconsommation ou de sous‑recours et de préparer des actions locales proportionnées (sensibilisation, renforcement de l'offre, audit ciblé)."
         ),
+        'montant_par_type': (
+            "Montant total par type",
+            "Histogramme des montants cumulés par type : confirme la hiérarchie financière et sert de pont avec le détail des sous‑types."),
+        'montant_par_sous_type': (
+            "Montant total par sous-type (Top 30)",
+            "Analyse concentrée sur les sous‑types les plus coûteux (Top 30 ou moins selon disponibilité) : met en lumière les niches spécifiques susceptibles d'actions ciblées (protocoles, prévention, renégociation)."),
         'pareto_actes': (
             "Courbe de Pareto des actes",
-            "La courbe cumulative illustre la part de dépense expliquée par un noyau restreint d'actes. Elle justifie une segmentation prioritaire pour optimiser l'effort de gestion."
+            "La courbe cumulative illustre quel pourcentage d'actes ou de catégories explique la majorité de la dépense. Un coude très précoce confirme la pertinence d'une stratégie focalisée sur un petit noyau; un profil plus étalé nécessite une approche plus systémique (processus, qualité globale)."
         ),
         'scatter_types': (
             "Dispersion actes (montant moyen vs fréquence)",
-            "La matrice fréquence / montant moyen positionne les actes : ceux combinant coût unitaire élevé et fréquence notable représentent la zone critique d'optimisation."
+            "La matrice positionne chaque acte selon deux axes critiques : impact budgétaire unitaire et omniprésence. Le quadrant à forte fréquence et forte valeur suggère des cibles prioritaires où protocolisation, sensibilisation clinique ou renégociation peuvent générer un effet de levier maximal."
+        ),
+        'repartition_beneficiaire_pie': (
+            "Répartition par bénéficiaire",
+            "Cette vue distingue adhérent principal et ayants droit (ou autres statuts disponibles) en montrant leur part dans le nombre total de prestations. Elle met en lumière d'éventuelles concentrations d'utilisation et alimente des stratégies de prévention différenciées (éducation thérapeutique, suivi chronique, sensibilisation)."
+        ),
+        'repartition_genre_pie': (
+            "Répartition par genre",
+            "Le découpage par genre met en évidence des écarts potentiels de recours. Une sur‑représentation stable peut traduire des habitudes de consultation différentes ou des profils pathologiques distincts. Cet indicateur sert de base à des analyses d'équité et à l'adaptation de programmes de prévention ciblés." 
         )
     }
-    graph_blocks = []
+    # Regrouper images par catégorie logique
+    image_groups: dict[str, list[tuple[str,str,str]]] = {}
     for p in images_paths:
         stem = p.stem
         titre, desc = graph_desc.get(stem, (stem.replace('_',' ').title(), "Graphique de suivi."))
         img_tag = _img_tag_from_path(p)
-        graph_blocks.append(f"<div class='visu'><h3>{titre}</h3><p class='expl'>{desc}</p>{img_tag}</div>")
-    imgs_html = '\n'.join(graph_blocks)
+        # Déduction catégorie
+        if stem.startswith('montant_par_acte'):
+            cat = 'repartition_par_acte'
+        elif stem.startswith('top10_centres'):
+            cat = 'repartition_par_centre'
+        elif stem.startswith('top10_partenaires'):
+            cat = 'repartition_par_partenaire'
+        elif stem.startswith('repartition_statut'):
+            cat = 'repartition_par_statut'
+        elif stem.startswith('repartition_beneficiaire'):
+            cat = 'repartition_par_beneficiaire'
+        elif stem.startswith('repartition_genre'):
+            cat = 'repartition_par_genre'
+        elif stem.startswith('repartition_region'):
+            cat = 'repartition_par_region'
+        elif stem.startswith('repartition_province'):
+            cat = 'repartition_par_province'
+        elif stem.startswith('montant_par_type'):
+            # Histogramme des montants par type : rattacher à la table repartition_par_type
+            cat = 'repartition_par_type'
+        elif stem.startswith('montant_par_sous_type'):
+            # Histogramme des montants par sous-type : rattacher à la table repartition_par_sous_type
+            cat = 'repartition_par_sous_type'
+        elif stem.startswith('evolution_mensuelle'):
+            cat = 'evolution_mensuelle'
+        elif stem.startswith('evolution_trimestrielle'):
+            cat = 'evolution_trimestrielle'
+        else:
+            cat = stem  # fallback unique
+        image_groups.setdefault(cat, []).append((titre, desc, img_tag))
+
+    # Construction des blocs unifiés (table + graphiques)
+    unified_blocks = []
+    def combine_explanations(table_key: str, img_infos: list[tuple[str,str,str]]):
+        tdesc = table_htmls.get(table_key, {}).get('desc','')
+        gdesc = ' '.join([d for (_, d, _) in img_infos]) if img_infos else ''
+        combined = (tdesc + ' ' + gdesc).strip()
+        return combined
+    # Liste des couples table->catégorie images à organiser
+    couples = [
+        ('repartition_par_acte','repartition_par_acte','Tableau : distribution des montants et fréquences par acte.','Graphiques : montants (barres) et part relative (camembert).'),
+        ('repartition_par_centre','repartition_par_centre','Tableau : classement des centres (montants / prestations).','Graphiques : top montants et top fréquences.'),
+        ('repartition_par_partenaire','repartition_par_partenaire','Tableau : classement des partenaires (montants / prestations).','Graphiques : top montants et top fréquences.'),
+        ('repartition_par_statut','repartition_par_statut','Tableau : répartition quantitative par statut.','Graphique : ventilation proportionnelle.'),
+        ('repartition_par_beneficiaire','repartition_par_beneficiaire','Tableau : répartition des prestations par catégorie de bénéficiaire.','Graphique : part relative de chaque catégorie.'),
+        ('repartition_par_genre','repartition_par_genre','Tableau : répartition des prestations par genre.','Graphique : part relative par genre.'),
+        ('repartition_par_type','repartition_par_type','Tableau : structure par grands types (montants & volumes).','Graphique : histogramme des montants par type.'),
+        ('repartition_par_sous_type','repartition_par_sous_type','Tableau : détail des sous-types triés par montant.','Graphique : histogramme (Top 30 sous-types).'),
+        ('repartition_par_region','repartition_par_region','Tableau : montants et volumes par région ordonnés par poids financier.','Graphique : comparaison visuelle montants (barres) et volumes (entre parenthèses).'),
+        ('repartition_par_province','repartition_par_province','Tableau : détail provincial (ordre décroissant) avec regroupement régional.','Graphique : mise en avant des provinces les plus contributrices.'),
+        ('evolution_mensuelle_tableau','evolution_mensuelle','Tableau : détail chronologique mois par mois (montants et volumes).','Graphique : dynamique conjointe montants (courbe) et volumes (barres).'),
+        ('evolution_trimestrielle_tableau','evolution_trimestrielle','Tableau : consolidation trimestrielle (lissage des fluctuations mensuelles).','Graphique : trajectoire structurée des montants agrégés par trimestre.')
+    ]
+    used_image_cats = set()
+    for table_key, img_cat, intro_table, intro_graph in couples:
+        if table_key in table_htmls and img_cat in image_groups:
+            title = table_htmls[table_key]['title']
+            combined_expl = combine_explanations(table_key, image_groups[img_cat])
+            block = f"<section class='bloc'><h3>{title}</h3><p class='expl'>{combined_expl}</p><p class='intro'>{intro_table}</p>{table_htmls[table_key]['html']}<p class='intro'>{intro_graph}</p>" + '\n'.join(
+                f"<figure>{img_tag}<figcaption>{t}</figcaption></figure>" for t,d,img_tag in image_groups[img_cat]
+            ) + "</section>"
+            unified_blocks.append(block)
+            used_image_cats.add(img_cat)
+
+    # Ajouter tables restantes sans images groupées
+    for k, meta in table_htmls.items():
+        if any(k == c[0] for c in couples):
+            continue
+        if k.endswith('_tableau'):
+            # Evolution tables
+            unified_blocks.append(f"<section class='bloc'><h3>{meta['title']}</h3><p class='expl'>{meta['desc']}</p>{meta['html']}</section>")
+        elif k in {'repartition_par_region','repartition_par_province','repartition_par_type','repartition_par_sous_type'}:
+            unified_blocks.append(f"<section class='bloc'><h3>{meta['title']}</h3><p class='expl'>{meta['desc']}</p>{meta['html']}</section>")
+
+    # Graphiques orphelins (sans tableau associé)
+    for cat, infos in image_groups.items():
+        # Ne pas exclure systématiquement les catégories de couples : seulement celles déjà utilisées
+        if cat in used_image_cats:
+            continue
+        if cat in {'evolution_mensuelle','evolution_trimestrielle','pareto_actes','scatter_types'}:
+            combined_desc = ' '.join([d for _, d, _ in infos])
+            title = infos[0][0]
+            figs = ''.join(f"<figure>{img}<figcaption>{t}</figcaption></figure>" for t,d,img in infos)
+            unified_blocks.append(f"<section class='bloc'><h3>{title}</h3><p class='expl'>{combined_desc}</p>{figs}</section>")
+
+    unified_html = '\n'.join(unified_blocks)
     objectifs_html = """
     <section>
         <h2>Objectif de l’analyse</h2>
@@ -1363,10 +1537,8 @@ details summary{{cursor:pointer;font-weight:600;margin:6px 0;}}
 <h2>3. Indicateurs globaux</h2>
 <p class='expl'>Tableau de synthèse générale (périmètre, dispersion, volumes et période d'observation) servant de point d'entrée à l'analyse.</p>
 <table class='tbl'><thead><tr><th>Indicateur</th><th>Valeur</th></tr></thead><tbody>{rows_indic}</tbody></table>
-<h2>4. Graphiques analytiques</h2>
-<div class='grid'>{imgs_html}</div>
-<h2>5. Tableaux de répartition détaillés</h2>
-{''.join(sections)}
+<h2>4. Analyses détaillées</h2>
+{unified_html}
 <hr style='margin:40px 0 15px;border:none;border-top:1px solid #ccc;'>
 <footer style='text-align:center;font-size:13px;color:#555;font-style:italic;'>
     <div style='display:flex;align-items:center;justify-content:center;gap:10px;'>
