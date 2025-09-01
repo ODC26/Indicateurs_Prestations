@@ -1196,7 +1196,9 @@ def main():
             centre_count = centre_count.head(10)
         p2 = plot_bar(centre_sum, 'Top 10 centres (montant)', 'top10_centres.png', horizontal=True, counts_series=centre_count)
         if p2: images_paths.append(p2)
-        p2b = plot_bar(reps['repartition_par_centre']['count'].head(10), 'Top 10 centres (nombre prestations)', 'top10_centres_nbp.png', horizontal=True)
+        # Trier par nombre de prestations en ordre décroissant pour le graphique
+        centre_count_sorted = reps['repartition_par_centre']['count'].sort_values(ascending=False).head(10)
+        p2b = plot_bar(centre_count_sorted, 'Top 10 centres (nombre prestations)', 'top10_centres_nbp.png', horizontal=True)
         if p2b: images_paths.append(p2b)
     if 'repartition_par_partenaire' in reps:
         part_sum = reps['repartition_par_partenaire']['sum'].head(10)
