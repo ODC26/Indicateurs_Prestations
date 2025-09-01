@@ -179,6 +179,27 @@ def compute_global(df: pd.DataFrame) -> dict:
             d['pourcentage_paye_pct'] = (montant_paye / montant_total * 100) if montant_total else math.nan
     if montant_col and adherent_col and 'taux_acceptation_pct' in d:
         d['cout_moyen_mutualiste'] = float(df[montant_col].sum() / df[adherent_col].nunique()) if df[adherent_col].nunique() else math.nan
+    
+    # Nouvelles analyses ajoutées
+    if adherent_col and montant_col:
+        # Nombre de mutualistes ayant consommé
+        mutualistes_ayant_consomme = int(df[adherent_col].nunique())
+        d['mutualistes_ayant_consomme'] = mutualistes_ayant_consomme
+        
+        # Coût moyen de consommation par bénéficiaire
+        # = Montant total de consommation / Nombre de mutualistes ayant consommé
+        if 'montant_total' in d and mutualistes_ayant_consomme > 0:
+            d['cout_moyen_par_beneficiaire'] = d['montant_total'] / mutualistes_ayant_consomme
+        else:
+            d['cout_moyen_par_beneficiaire'] = math.nan
+        
+        # Taux de recours aux prestations globales
+        # (Nombre de mutualistes ayant consommé / Nombre total de mutualistes éligibles) x 100
+        # Nombre total de mutualistes éligibles selon les données fournies
+        nombre_total_mutualistes_eligibles = 5284
+        d['taux_recours_pct'] = (mutualistes_ayant_consomme / nombre_total_mutualistes_eligibles * 100) if nombre_total_mutualistes_eligibles > 0 else math.nan
+        d['nombre_total_mutualistes_eligibles'] = nombre_total_mutualistes_eligibles
+    
     # Période couverte
     if date_col:
         d['periode_min'] = df[date_col].min()
@@ -195,6 +216,10 @@ INDIC_LABELS = {
     'nb_mutualistes_distincts': 'Nombre de mutualistes distincts',
     'taux_acceptation_pct': "Taux d'acceptation (%)",
     'cout_moyen_mutualiste': 'Coût moyen par mutualiste',
+    'mutualistes_ayant_consomme': 'Mutualistes ayant consommé',
+    'cout_moyen_par_beneficiaire': 'Coût moyen de consommation par bénéficiaire',
+    'taux_recours_pct': 'Taux de recours aux prestations globales (%)',
+    'nombre_total_mutualistes_eligibles': 'Nombre total de mutualistes éligibles',
     'montant_paye_total': 'Montant total payé (accepté)',
     'montant_non_paye': 'Montant non payé',
     'pourcentage_paye_pct': 'Pourcentage payé (%)',
@@ -250,7 +275,48 @@ def repartitions(df: pd.DataFrame) -> dict[str, pd.DataFrame | pd.Series]:
     }
     for key, col in mapping.items():
         if key not in ('repartition_par_province',) and col and col in df.columns:
-            out[key] = agg(col)
+            result = agg(col)
+            # Ajout spécial pour les bénéficiaires : proportion ayants droits + ligne totale
+            if key == 'repartition_par_beneficiaire' and 'mutualistes_distincts' in result.columns:
+                result = result.copy()
+                
+                # Calculer les totaux pour adhérents et ayants droits
+                adherents_mask = result.index.str.lower().str.startswith('adhérent') | result.index.str.lower().str.startswith('adherent')
+                ayants_droits_mask = result.index.str.lower().str.contains('ayant', case=False, na=False)
+                
+                # Extraire les données pour adhérents
+                if adherents_mask.any():
+                    adherents_data = result.loc[adherents_mask]
+                    montant_total_adherents = adherents_data['sum'].sum()
+                    prestations_total_adherents = adherents_data['count'].sum()
+                    mutualistes_total_adherents = adherents_data['mutualistes_distincts'].sum()
+                else:
+                    montant_total_adherents = prestations_total_adherents = mutualistes_total_adherents = 0
+                
+                # Extraire les données pour ayants droits
+                if ayants_droits_mask.any():
+                    ayants_droits_data = result.loc[ayants_droits_mask]
+                    montant_total_ayants_droits = ayants_droits_data['sum'].sum()
+                    prestations_total_ayants_droits = ayants_droits_data['count'].sum()
+                    mutualistes_total_ayants_droits = ayants_droits_data['mutualistes_distincts'].sum()
+                else:
+                    montant_total_ayants_droits = prestations_total_ayants_droits = mutualistes_total_ayants_droits = 0
+                
+                # Totaux globaux
+                montant_total_global = montant_total_adherents + montant_total_ayants_droits
+                prestations_total_global = prestations_total_adherents + prestations_total_ayants_droits
+                mutualistes_total_global = mutualistes_total_adherents + mutualistes_total_ayants_droits
+                montant_moyen_global = montant_total_global / prestations_total_global if prestations_total_global > 0 else 0
+                
+                # Ajouter la ligne "Mutualiste" (total)
+                result.loc['Mutualiste', :] = [montant_total_global, prestations_total_global, montant_moyen_global, mutualistes_total_global]
+                
+                # Ajouter la proportion en pourcentage
+                if mutualistes_total_adherents > 0:
+                    proportion_ayants_droits = (mutualistes_total_ayants_droits / mutualistes_total_adherents) * 100
+                    result.loc['Proportion ayants droits/adhérents (%)', :] = [math.nan, math.nan, math.nan, proportion_ayants_droits]
+            
+            out[key] = result
     # Province multi-index region+province
     region_col = mapping['repartition_par_region']
     province_col = next((c for c in df.columns if c.lower() == 'province'), None)
@@ -687,6 +753,63 @@ def plot_montant_moyen_comparison(data, title, filename):
         
         # Formatage de l'axe Y
         ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: format_abbrev(x)))
+        
+        plt.tight_layout()
+        
+        # Sauvegarde
+        path = FIG_DIR / filename
+        fig.savefig(path, dpi=300, bbox_inches='tight')
+        plt.close(fig)
+        return path
+        
+    except Exception as e:
+        print(f"Erreur lors de la création du graphique {filename}: {e}")
+        return None
+
+def plot_proportions_prestations(proportions_data, title, filename):
+    """
+    Créer un graphique en barres horizontales pour les proportions de prestations (hors pharmacie)
+    """
+    try:
+        # Prendre les 15 premiers actes pour la lisibilité
+        data_top = proportions_data[:15]
+        
+        # Extraire les données
+        actes = [row['Acte'] for row in data_top]
+        proportions = [row['Proportion_pct'] for row in data_top]
+        
+        # Créer la figure
+        fig, ax = plt.subplots(figsize=(12, 8))
+        
+        # Créer le graphique en barres horizontales
+        colors = plt.cm.Set3(np.linspace(0, 1, len(actes)))
+        bars = ax.barh(range(len(actes)), proportions, color=colors, alpha=0.8, edgecolor='black', linewidth=0.5)
+        
+        # Ajouter les valeurs sur les barres
+        for i, (bar, value) in enumerate(zip(bars, proportions)):
+            width = bar.get_width()
+            ax.text(width + 0.1, bar.get_y() + bar.get_height()/2, 
+                   f'{value:.1f}%', ha='left', va='center', fontweight='bold', fontsize=10)
+        
+        # Personnalisation
+        ax.set_xlabel('Proportion (%)', fontsize=12, fontweight='bold')
+        ax.set_ylabel('Types de prestations', fontsize=12, fontweight='bold')
+        ax.set_title(title, fontsize=14, fontweight='bold', pad=20)
+        
+        # Définir les labels des axes Y (actes)
+        ax.set_yticks(range(len(actes)))
+        ax.set_yticklabels(actes, fontsize=10)
+        
+        # Inverser l'ordre pour avoir le plus gros en haut
+        ax.invert_yaxis()
+        
+        # Grille pour la lisibilité
+        ax.grid(axis='x', alpha=0.3, linestyle='--')
+        ax.set_axisbelow(True)
+        
+        # Définir les limites de l'axe X
+        max_prop = max(proportions)
+        ax.set_xlim(0, max_prop * 1.15)
         
         plt.tight_layout()
         
@@ -1749,14 +1872,22 @@ def generer_rapport_html(global_indic: dict, reps: dict, evo: pd.DataFrame, comp
 
     # Nouvelle analyse demandée : Montant moyen par prestation pour chaque acte (2024 vs 2025)
     try:
+        print("[DEBUG] Début de l'analyse montant moyen par acte...")
         df_src = charger(SOURCE_FILE)
+        print(f"[DEBUG] Données chargées: {len(df_src)} lignes")
+        
         date_col = next((c for c in df_src.columns if c.lower() == 'date'), None)
         montant_col = next((c for c in df_src.columns if 'montant' in c.lower()), None)
         acte_col = next((c for c in df_src.columns if c.lower() == 'acte'), None)
         
+        print(f"[DEBUG] Colonnes trouvées: date={date_col}, montant={montant_col}, acte={acte_col}")
+        
         if date_col and montant_col and acte_col:
+            print("[DEBUG] Toutes les colonnes sont disponibles, traitement...")
             tmp = df_src[[date_col, montant_col, acte_col]].copy()
             tmp['Annee'] = tmp[date_col].dt.year
+            
+            print(f"[DEBUG] Années disponibles: {sorted(tmp['Annee'].unique())}")
             
             # Calculer montant moyen par prestation pour chaque acte et chaque année
             stats_par_acte = []
@@ -1769,8 +1900,13 @@ def generer_rapport_html(global_indic: dict, reps: dict, evo: pd.DataFrame, comp
             # Aplatir les colonnes multi-niveaux
             grouped.columns = [acte_col, 'Annee', 'nb_prestations', 'montant_total', 'montant_moyen']
             
+            print(f"[DEBUG] Données groupées: {len(grouped)} lignes")
+            print(f"[DEBUG] Aperçu des données groupées:")
+            print(grouped.head())
+            
             # Restructurer pour avoir un tableau avec actes en lignes et années en colonnes
             actes_uniques = sorted(grouped[acte_col].unique())
+            print(f"[DEBUG] Actes uniques trouvés: {actes_uniques}")
             
             tableau_data = []
             for acte in actes_uniques:
@@ -1808,6 +1944,7 @@ def generer_rapport_html(global_indic: dict, reps: dict, evo: pd.DataFrame, comp
             
             # Créer le tableau HTML
             if tableau_data:
+                print(f"[DEBUG] Création du tableau HTML avec {len(tableau_data)} actes...")
                 headers = [
                     'Acte', 
                     'Prestations 2024', 'Montant moyen 2024',
@@ -1850,6 +1987,8 @@ def generer_rapport_html(global_indic: dict, reps: dict, evo: pd.DataFrame, comp
                     "html": html_table_inner
                 }
                 
+                print("[DEBUG] Tableau HTML 'montant_moyen_par_acte' créé avec succès!")
+                
                 # Générer le graphique correspondant
                 chart_filename = 'montant_moyen_par_acte_comparison.png'
                 chart_title = 'Comparaison du montant moyen par type de prestation : 2024 vs 2025'
@@ -1860,8 +1999,164 @@ def generer_rapport_html(global_indic: dict, reps: dict, evo: pd.DataFrame, comp
                     print(f"Graphique généré : {chart_path}")
                 else:
                     print("Erreur lors de la génération du graphique")
+            else:
+                print("[DEBUG] Aucune donnée pour le tableau montant_moyen_par_acte")
+        else:
+            print(f"[DEBUG] Colonnes manquantes pour l'analyse montant moyen par acte")
+    except Exception as e:
+        print(f"Erreur lors de l'analyse du montant moyen par acte: {e}")
+
+    # Nouvelle analyse demandée : Proportion de chaque prestation (excepté pharmacie) sur le total
+    try:
+        df_src = charger(SOURCE_FILE)
+        acte_col = next((c for c in df_src.columns if c.lower() == 'acte'), None)
+        
+        if acte_col:
+            # Filtrer pour exclure la pharmacie
+            df_no_pharma = df_src[~df_src[acte_col].str.lower().str.contains('pharmaci', na=False)].copy()
+            
+            # Compter les prestations par acte (sans pharmacie)
+            counts_par_acte = df_no_pharma[acte_col].value_counts()
+            total_prestations_no_pharma = len(df_no_pharma)
+            
+            # Calculer les proportions
+            proportions_data = []
+            for acte, count in counts_par_acte.items():
+                proportion_pct = (count / total_prestations_no_pharma) * 100
+                proportions_data.append({
+                    'Acte': acte,
+                    'Nombre_prestations': count,
+                    'Proportion_pct': proportion_pct
+                })
+            
+            # Trier par proportion décroissante
+            proportions_data.sort(key=lambda x: x['Proportion_pct'], reverse=True)
+            
+            # Créer le tableau HTML
+            if proportions_data:
+                headers = [
+                    'Acte', 
+                    'Nombre de prestations',
+                    'Proportion (%)',
+                    'Représentation visuelle'
+                ]
+                
+                # Construire les lignes du tableau
+                body_rows = []
+                for row in proportions_data:
+                    # Barre de progression visuelle
+                    bar_width = min(100, row['Proportion_pct'] * 2)  # Ajuster l'échelle pour la visibilité
+                    progress_bar = f"<div style='background:#e0e0e0;width:100px;height:15px;border-radius:3px;'><div style='background:#4CAF50;width:{bar_width}px;height:15px;border-radius:3px;'></div></div>"
+                    
+                    cells = [
+                        f"<td style='font-weight:600;'>{row['Acte']}</td>",
+                        f"<td>{fmt(row['Nombre_prestations'])}</td>",
+                        f"<td style='font-weight:600;'>{row['Proportion_pct']:.2f}%</td>",
+                        f"<td>{progress_bar}</td>"
+                    ]
+                    body_rows.append(f"<tr>{''.join(cells)}</tr>")
+                
+                # Ajouter une ligne de total
+                total_row = f"<tr style='background:#f8f9fa;border-top:2px solid #ddd;'><td style='font-weight:600;'>TOTAL (sans pharmacie)</td><td style='font-weight:600;'>{fmt(total_prestations_no_pharma)}</td><td style='font-weight:600;'>100.00%</td><td>-</td></tr>"
+                body_rows.append(total_row)
+                
+                headers_html = ''.join(f'<th>{h}</th>' for h in headers)
+                html_table_inner = f"<table class='tbl'><thead><tr>{headers_html}</tr></thead><tbody>{''.join(body_rows)}</tbody></table>"
+                
+                table_htmls['proportion_prestations_sans_pharmacie'] = {
+                    "title": 'Proportion de chaque prestation (hors pharmacie) sur le total', 
+                    "desc": f'Répartition proportionnelle des {total_prestations_no_pharma} prestations par type d\'acte, pharmacie exclue. La formule utilisée : (Nombre de prestations par acte / Total prestations sans pharmacie) × 100.', 
+                    "html": html_table_inner
+                }
+                
+                # Générer le graphique correspondant
+                chart_filename = 'proportions_prestations_sans_pharmacie.png'
+                chart_title = 'Proportions des prestations par type (hors pharmacie)'
+                print(f"Génération du graphique {chart_filename}...")
+                chart_path = plot_proportions_prestations(proportions_data, chart_title, chart_filename)
+                if chart_path:
+                    images_paths.append(chart_path)
+                    print(f"Graphique généré : {chart_path}")
+                else:
+                    print("Erreur lors de la génération du graphique des proportions")
     except Exception:
         pass
+
+    # ==== NOUVELLES ANALYSES DEMANDÉES ====
+    try:
+        # 1. Taux de recours aux prestations globales
+        # 1. Taux de recours aux prestations globales
+        # Calcul basé sur les données réelles des bénéficiaires
+        
+        # Calculer le nombre de mutualistes ayant consommé à partir du tableau des bénéficiaires
+        mutualistes_ayant_consomme_reel = 0
+        if 'repartition_par_beneficiaire' in reps and isinstance(reps['repartition_par_beneficiaire'], pd.DataFrame):
+            beneficiaires_df = reps['repartition_par_beneficiaire']
+            if 'mutualistes_distincts' in beneficiaires_df.columns:
+                # Somme des adhérents + ayants droits (exclure les lignes calculées)
+                for idx, row in beneficiaires_df.iterrows():
+                    if isinstance(idx, str) and (idx.lower().startswith('adherent') or idx.lower().startswith('adhérent') or (idx.lower().startswith('ayant') and 'droit' in idx.lower())):
+                        mutualistes_ayant_consomme_reel += int(row['mutualistes_distincts'])
+        
+        # Si on n'arrive pas à calculer depuis les bénéficiaires, on utilise la valeur globale
+        if mutualistes_ayant_consomme_reel == 0:
+            mutualistes_ayant_consomme_reel = global_indic.get('mutualistes_ayant_consomme', 0)
+        
+        # Configuration: Nombre total de mutualistes éligibles (valeur réelle fournie)
+        TOTAL_MUTUALISTES_ELIGIBLES = 5284
+        
+        if mutualistes_ayant_consomme_reel > 0 and TOTAL_MUTUALISTES_ELIGIBLES > 0:
+            taux_recours = (mutualistes_ayant_consomme_reel / TOTAL_MUTUALISTES_ELIGIBLES) * 100
+            
+            # Tableau pour le taux de recours
+            recours_data = [
+                ('Mutualistes ayant consommé (Adhérents + Ayants droits)', mutualistes_ayant_consomme_reel),
+                ('Total mutualistes éligibles', TOTAL_MUTUALISTES_ELIGIBLES),
+                ('Taux de recours (%)', round(taux_recours, 2))
+            ]
+            
+            headers_recours = ['Indicateur', 'Valeur']
+            body_rows_recours = []
+            for label, value in recours_data:
+                formatted_value = fmt(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else str(value)
+                body_rows_recours.append(f"<tr><td>{label}</td><td>{formatted_value}</td></tr>")
+            
+            headers_html_recours = ''.join(f"<th>{h}</th>" for h in headers_recours)
+            html_table_recours = f"<table class='tbl'><thead><tr>{headers_html_recours}</tr></thead><tbody>{''.join(body_rows_recours)}</tbody></table>"
+            
+            table_htmls['taux_recours_global'] = {
+                "title": 'Taux de recours aux prestations globales', 
+                "desc": f'Indicateur mesurant la proportion de mutualistes ayant effectivement consommé des prestations sur l\'ensemble des mutualistes éligibles. Basé sur la somme des adhérents (1 229) et ayants droits (102) ayant consommé. Formule: (Nombre de mutualistes ayant consommé / Nombre total de mutualistes éligibles) × 100.', 
+                "html": html_table_recours
+            }
+        
+        # 2. Coût moyen de consommation par bénéficiaire 
+        cout_moyen_beneficiaire = global_indic.get('cout_moyen_par_beneficiaire', 0)
+        montant_total_consommation = global_indic.get('montant_total', 0)
+        
+        if cout_moyen_beneficiaire > 0:
+            beneficiaire_data = [
+                ('Montant total de consommation', fmt(montant_total_consommation)),
+                ('Nombre de mutualistes ayant consommé', mutualistes_ayant_consomme_reel),
+                ('Coût moyen par bénéficiaire', fmt(cout_moyen_beneficiaire))
+            ]
+            
+            headers_beneficiaire = ['Indicateur', 'Valeur']
+            body_rows_beneficiaire = []
+            for label, value in beneficiaire_data:
+                body_rows_beneficiaire.append(f"<tr><td>{label}</td><td>{value}</td></tr>")
+            
+            headers_html_beneficiaire = ''.join(f"<th>{h}</th>" for h in headers_beneficiaire)
+            html_table_beneficiaire = f"<table class='tbl'><thead><tr>{headers_html_beneficiaire}</tr></thead><tbody>{''.join(body_rows_beneficiaire)}</tbody></table>"
+            
+            table_htmls['cout_moyen_consommation'] = {
+                "title": 'Coût moyen de consommation par bénéficiaire', 
+                "desc": f'Analyse du coût moyen supporté par chaque mutualiste ayant effectivement consommé des prestations. Basé sur {mutualistes_ayant_consomme_reel} mutualistes (adhérents + ayants droits). Formule: Montant total de consommation / Nombre de mutualistes ayant consommé.', 
+                "html": html_table_beneficiaire
+            }
+            
+    except Exception as e:
+        print(f"Erreur lors du calcul des nouvelles analyses: {e}")
 
     # Tableau d'évolution trimestrielle
     if isinstance(evo, pd.DataFrame) and not evo.empty:
@@ -1991,6 +2286,10 @@ def generer_rapport_html(global_indic: dict, reps: dict, evo: pd.DataFrame, comp
         'montant_moyen_par_acte_comparison': (
             "Comparaison du montant moyen par type de prestation : 2024 vs 2025",
             "Ce graphique en barres groupées visualise l'évolution des coûts moyens pour chaque type de prestation entre 2024 et 2025. Les différences de hauteur entre les barres révèlent les prestations qui ont connu une inflation ou une déflation tarifaire, guidant les décisions budgétaires et de couverture."
+        ),
+        'proportions_prestations_sans_pharmacie': (
+            "Proportions des prestations par type (hors pharmacie)",
+            "Ce graphique en barres horizontales présente visuellement la répartition proportionnelle des prestations par type d'acte, en excluant la pharmacie. Il permet d'identifier rapidement les prestations dominantes et d'analyser la structure des activités médicales pour une meilleure allocation des ressources."
         )
     }
     # Regrouper images par catégorie logique
@@ -2032,6 +2331,12 @@ def generer_rapport_html(global_indic: dict, reps: dict, evo: pd.DataFrame, comp
             cat = 'evolution_mensuelle'
         elif stem.startswith('evolution_trimestrielle'):
             cat = 'evolution_trimestrielle'
+        elif stem.startswith('montant_moyen_par_acte_comparison'):
+            # Graphique de comparaison des montants moyens par acte
+            cat = 'montant_moyen_par_acte_comparison'
+        elif stem.startswith('proportions_prestations_sans_pharmacie'):
+            # Graphique des proportions de prestations (hors pharmacie)
+            cat = 'proportion_prestations_sans_pharmacie'
         else:
             cat = stem  # fallback unique
         image_groups.setdefault(cat, []).append((titre, desc, img_tag))
@@ -2059,11 +2364,19 @@ def generer_rapport_html(global_indic: dict, reps: dict, evo: pd.DataFrame, comp
         ('evolution_trimestrielle_tableau','evolution_trimestrielle','Tableau : consolidation trimestrielle (lissage des fluctuations mensuelles).','Graphique : trajectoire structurée des montants agrégés par trimestre.'),
         ('nombre_mensuel_par_acte_2024','nombre_mensuel_par_acte_2024','Tableau : évolution mensuelle des prestations par acte en 2024.','Graphique : courbes multiples montrant les tendances temporelles pour chaque type de prestation.'),
         ('nombre_mensuel_par_acte_2025','nombre_mensuel_par_acte_2025','Tableau : évolution mensuelle des prestations par acte en 2025.','Graphique : courbes multiples permettant la comparaison avec 2024 et l\'analyse des tendances émergentes.'),
-        ('montant_moyen_par_acte','montant_moyen_par_acte_comparison','Tableau : montants moyens par type de prestation comparés entre 2024 et 2025.','Graphique : barres groupées visualisant l\'évolution des coûts moyens pour identifier les inflations tarifaires par spécialité.')
+        ('montant_moyen_par_acte','montant_moyen_par_acte_comparison','Tableau : montants moyens par type de prestation comparés entre 2024 et 2025.','Graphique : barres groupées visualisant l\'évolution des coûts moyens pour identifier les inflations tarifaires par spécialité.'),
+        ('proportion_prestations_sans_pharmacie','proportion_prestations_sans_pharmacie','Tableau : répartition proportionnelle des prestations par acte (hors pharmacie).','Graphique : barres horizontales visualisant la dominance relative de chaque type de prestation dans l\'activité globale.'),
+        ('taux_recours_global','taux_recours_global','Tableau : indicateurs de taux de recours aux prestations.','Analyse de la participation effective des mutualistes aux prestations disponibles.'),
+        ('cout_moyen_consommation','cout_moyen_consommation','Tableau : coût moyen de consommation par bénéficiaire.','Évaluation de l\'effort financier moyen par mutualiste ayant consommé.')
     ]
     used_image_cats = set()
     for table_key, img_cat, intro_table, intro_graph in couples:
+        print(f"[DEBUG] Vérification couple: table='{table_key}', image_cat='{img_cat}'")
+        print(f"[DEBUG] Table existe: {table_key in table_htmls}")
+        print(f"[DEBUG] Image category existe: {img_cat in image_groups}")
+        
         if table_key in table_htmls and img_cat in image_groups:
+            print(f"[DEBUG] Couple OK: {table_key} -> {img_cat}")
             title = table_htmls[table_key]['title']
             combined_expl = combine_explanations(table_key, image_groups[img_cat])
             block = f"<section class='bloc'><h3>{title}</h3><p class='expl'>{combined_expl}</p><p class='intro'>{intro_table}</p>{table_htmls[table_key]['html']}<p class='intro'>{intro_graph}</p>" + '\n'.join(
@@ -2073,11 +2386,14 @@ def generer_rapport_html(global_indic: dict, reps: dict, evo: pd.DataFrame, comp
             used_image_cats.add(img_cat)
 
     # Ajouter tables restantes sans images groupées
+    print(f"[DEBUG] Vérification tables restantes...")
     for k, meta in table_htmls.items():
+        print(f"[DEBUG] Table '{k}': dans couples={any(k == c[0] for c in couples)}")
         if any(k == c[0] for c in couples):
             continue
         # Inclure explicitement nos tables mensuelles personnalisées (sauf celles déjà dans couples)
-        if k.endswith('_tableau') or k in {'repartition_par_region','repartition_par_province','repartition_par_type','repartition_par_sous_type','nombre_prestations_par_mois','montant_moyen_par_acte'}:
+        if k.endswith('_tableau') or k in {'repartition_par_region','repartition_par_province','repartition_par_type','repartition_par_sous_type','nombre_prestations_par_mois','montant_moyen_par_acte','taux_recours_global','cout_moyen_consommation'}:
+            print(f"[DEBUG] Ajout table restante: {k}")
             unified_blocks.append(f"<section class='bloc'><h3>{meta['title']}</h3><p class='expl'>{meta['desc']}</p>{meta['html']}</section>")
 
     # Graphiques orphelins (sans tableau associé)
