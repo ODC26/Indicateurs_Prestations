@@ -629,6 +629,77 @@ def plot_monthly_lines(pivot_data: pd.DataFrame, title: str, filename: str, year
         print(f"Erreur lors de la création du graphique {filename}: {e}")
         return None
 
+def plot_montant_moyen_comparison(data, title, filename):
+    """Créer un graphique en barres groupées pour comparer les montants moyens par acte entre 2024 et 2025."""
+    try:
+        fig, ax = plt.subplots(figsize=(14, 8))
+        
+        # Préparer les données
+        actes = [row['Acte'] for row in data]
+        montants_2024 = [row['Montant_moyen_2024'] for row in data]
+        montants_2025 = [row['Montant_moyen_2025'] for row in data]
+        
+        # Limiter à 15 actes max pour la lisibilité
+        if len(actes) > 15:
+            actes = actes[:15]
+            montants_2024 = montants_2024[:15]
+            montants_2025 = montants_2025[:15]
+        
+        # Configuration des barres
+        x = np.arange(len(actes))
+        width = 0.35
+        
+        # Créer les barres
+        bars1 = ax.bar(x - width/2, montants_2024, width, label='2024', 
+                      color='#2E86AB', alpha=0.8, edgecolor='white', linewidth=0.8)
+        bars2 = ax.bar(x + width/2, montants_2025, width, label='2025', 
+                      color='#A23B72', alpha=0.8, edgecolor='white', linewidth=0.8)
+        
+        # Ajouter les valeurs sur les barres
+        def add_value_labels(bars, values):
+            for bar, val in zip(bars, values):
+                if val > 0:
+                    height = bar.get_height()
+                    ax.annotate(f'{format_abbrev(val)}',
+                              xy=(bar.get_x() + bar.get_width() / 2, height),
+                              xytext=(0, 3),  # 3 points de décalage vertical
+                              textcoords="offset points",
+                              ha='center', va='bottom', fontsize=9, fontweight='bold')
+        
+        add_value_labels(bars1, montants_2024)
+        add_value_labels(bars2, montants_2025)
+        
+        # Personnalisation
+        ax.set_xlabel('Types de prestations', fontsize=12, fontweight='bold')
+        ax.set_ylabel('Montant moyen (FCFA)', fontsize=12, fontweight='bold')
+        ax.set_title(title, fontsize=14, fontweight='bold', pad=20)
+        
+        # Rotation des labels d'actes pour la lisibilité
+        ax.set_xticks(x)
+        ax.set_xticklabels(actes, rotation=45, ha='right', fontsize=10)
+        
+        # Légende
+        ax.legend(fontsize=11, loc='upper right')
+        
+        # Grille légère
+        ax.grid(True, alpha=0.3, axis='y')
+        ax.set_axisbelow(True)
+        
+        # Formatage de l'axe Y
+        ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: format_abbrev(x)))
+        
+        plt.tight_layout()
+        
+        # Sauvegarde
+        path = FIG_DIR / filename
+        fig.savefig(path, dpi=300, bbox_inches='tight')
+        plt.close(fig)
+        return path
+        
+    except Exception as e:
+        print(f"Erreur lors de la création du graphique {filename}: {e}")
+        return None
+
 # ------------------ Export Excel ------------------ #
 
 def export_excel(global_indic: dict, reps: dict, evo: pd.DataFrame, comp_t1: pd.DataFrame, df: pd.DataFrame):
@@ -1676,6 +1747,122 @@ def generer_rapport_html(global_indic: dict, reps: dict, evo: pd.DataFrame, comp
     except Exception:
         pass
 
+    # Nouvelle analyse demandée : Montant moyen par prestation pour chaque acte (2024 vs 2025)
+    try:
+        df_src = charger(SOURCE_FILE)
+        date_col = next((c for c in df_src.columns if c.lower() == 'date'), None)
+        montant_col = next((c for c in df_src.columns if 'montant' in c.lower()), None)
+        acte_col = next((c for c in df_src.columns if c.lower() == 'acte'), None)
+        
+        if date_col and montant_col and acte_col:
+            tmp = df_src[[date_col, montant_col, acte_col]].copy()
+            tmp['Annee'] = tmp[date_col].dt.year
+            
+            # Calculer montant moyen par prestation pour chaque acte et chaque année
+            stats_par_acte = []
+            
+            # Grouper par acte et année
+            grouped = tmp.groupby([acte_col, 'Annee']).agg({
+                montant_col: ['count', 'sum', 'mean']
+            }).reset_index()
+            
+            # Aplatir les colonnes multi-niveaux
+            grouped.columns = [acte_col, 'Annee', 'nb_prestations', 'montant_total', 'montant_moyen']
+            
+            # Restructurer pour avoir un tableau avec actes en lignes et années en colonnes
+            actes_uniques = sorted(grouped[acte_col].unique())
+            
+            tableau_data = []
+            for acte in actes_uniques:
+                row_data = {'Acte': acte}
+                
+                # Données pour 2024
+                data_2024 = grouped[(grouped[acte_col] == acte) & (grouped['Annee'] == 2024)]
+                if not data_2024.empty:
+                    row_data['Prestations_2024'] = int(data_2024.iloc[0]['nb_prestations'])
+                    row_data['Montant_moyen_2024'] = data_2024.iloc[0]['montant_moyen']
+                else:
+                    row_data['Prestations_2024'] = 0
+                    row_data['Montant_moyen_2024'] = 0
+                
+                # Données pour 2025
+                data_2025 = grouped[(grouped[acte_col] == acte) & (grouped['Annee'] == 2025)]
+                if not data_2025.empty:
+                    row_data['Prestations_2025'] = int(data_2025.iloc[0]['nb_prestations'])
+                    row_data['Montant_moyen_2025'] = data_2025.iloc[0]['montant_moyen']
+                else:
+                    row_data['Prestations_2025'] = 0
+                    row_data['Montant_moyen_2025'] = 0
+                
+                # Calculer l'évolution
+                if row_data['Montant_moyen_2024'] > 0 and row_data['Montant_moyen_2025'] > 0:
+                    evolution_pct = ((row_data['Montant_moyen_2025'] - row_data['Montant_moyen_2024']) / row_data['Montant_moyen_2024']) * 100
+                    row_data['Evolution'] = evolution_pct
+                else:
+                    row_data['Evolution'] = None
+                
+                tableau_data.append(row_data)
+            
+            # Trier par montant moyen 2024 décroissant
+            tableau_data.sort(key=lambda x: x['Montant_moyen_2024'], reverse=True)
+            
+            # Créer le tableau HTML
+            if tableau_data:
+                headers = [
+                    'Acte', 
+                    'Prestations 2024', 'Montant moyen 2024',
+                    'Prestations 2025', 'Montant moyen 2025',
+                    'Évolution (%)'
+                ]
+                
+                # Construire les lignes du tableau
+                body_rows = []
+                for row in tableau_data:
+                    # Formatage de l'évolution
+                    if row['Evolution'] is not None:
+                        evolution_val = row['Evolution']
+                        if evolution_val > 0:
+                            evolution_txt = f"↗️ +{evolution_val:.1f}%"
+                            evolution_color = "green"
+                        else:
+                            evolution_txt = f"↘️ {evolution_val:.1f}%"
+                            evolution_color = "red"
+                    else:
+                        evolution_txt = "-"
+                        evolution_color = "gray"
+                    
+                    cells = [
+                        f"<td style='font-weight:600;'>{row['Acte']}</td>",
+                        f"<td>{fmt(row['Prestations_2024'])}</td>",
+                        f"<td style='font-weight:600;'>{fmt(row['Montant_moyen_2024'])}</td>",
+                        f"<td>{fmt(row['Prestations_2025'])}</td>",
+                        f"<td style='font-weight:600;'>{fmt(row['Montant_moyen_2025'])}</td>",
+                        f"<td style='font-weight:600;color:{evolution_color};'>{evolution_txt}</td>"
+                    ]
+                    body_rows.append(f"<tr>{''.join(cells)}</tr>")
+                
+                headers_html = ''.join(f'<th>{h}</th>' for h in headers)
+                html_table_inner = f"<table class='tbl'><thead><tr>{headers_html}</tr></thead><tbody>{''.join(body_rows)}</tbody></table>"
+                
+                table_htmls['montant_moyen_par_acte'] = {
+                    "title": 'Montant moyen par type de prestation : comparaison 2024 vs 2025', 
+                    "desc": 'Analyse comparative du coût moyen de chaque type de prestation entre 2024 (12 mois) et 2025 (période partielle), avec calcul de l\'évolution par acte.', 
+                    "html": html_table_inner
+                }
+                
+                # Générer le graphique correspondant
+                chart_filename = 'montant_moyen_par_acte_comparison.png'
+                chart_title = 'Comparaison du montant moyen par type de prestation : 2024 vs 2025'
+                print(f"Génération du graphique {chart_filename}...")
+                chart_path = plot_montant_moyen_comparison(tableau_data, chart_title, chart_filename)
+                if chart_path:
+                    images_paths.append(chart_path)
+                    print(f"Graphique généré : {chart_path}")
+                else:
+                    print("Erreur lors de la génération du graphique")
+    except Exception:
+        pass
+
     # Tableau d'évolution trimestrielle
     if isinstance(evo, pd.DataFrame) and not evo.empty:
         # Reconstituer trimestre à partir de la période mensuelle
@@ -1800,6 +1987,10 @@ def generer_rapport_html(global_indic: dict, reps: dict, evo: pd.DataFrame, comp
         'evolution_mensuelle_actes_2025': (
             "Évolution mensuelle des prestations par acte - 2025",
             "Cette visualisation pour 2025 permet la comparaison avec 2024 et l'identification des changements de comportement ou d'organisation. Les tendances émergentes servent à anticiper les besoins futurs et ajuster la stratégie de couverture en temps réel."
+        ),
+        'montant_moyen_par_acte_comparison': (
+            "Comparaison du montant moyen par type de prestation : 2024 vs 2025",
+            "Ce graphique en barres groupées visualise l'évolution des coûts moyens pour chaque type de prestation entre 2024 et 2025. Les différences de hauteur entre les barres révèlent les prestations qui ont connu une inflation ou une déflation tarifaire, guidant les décisions budgétaires et de couverture."
         )
     }
     # Regrouper images par catégorie logique
@@ -1867,7 +2058,8 @@ def generer_rapport_html(global_indic: dict, reps: dict, evo: pd.DataFrame, comp
         ('evolution_mensuelle_tableau','evolution_mensuelle','Tableau : détail chronologique mois par mois (montants et volumes).','Graphique : dynamique conjointe montants (courbe) et volumes (barres).'),
         ('evolution_trimestrielle_tableau','evolution_trimestrielle','Tableau : consolidation trimestrielle (lissage des fluctuations mensuelles).','Graphique : trajectoire structurée des montants agrégés par trimestre.'),
         ('nombre_mensuel_par_acte_2024','nombre_mensuel_par_acte_2024','Tableau : évolution mensuelle des prestations par acte en 2024.','Graphique : courbes multiples montrant les tendances temporelles pour chaque type de prestation.'),
-        ('nombre_mensuel_par_acte_2025','nombre_mensuel_par_acte_2025','Tableau : évolution mensuelle des prestations par acte en 2025.','Graphique : courbes multiples permettant la comparaison avec 2024 et l\'analyse des tendances émergentes.')
+        ('nombre_mensuel_par_acte_2025','nombre_mensuel_par_acte_2025','Tableau : évolution mensuelle des prestations par acte en 2025.','Graphique : courbes multiples permettant la comparaison avec 2024 et l\'analyse des tendances émergentes.'),
+        ('montant_moyen_par_acte','montant_moyen_par_acte_comparison','Tableau : montants moyens par type de prestation comparés entre 2024 et 2025.','Graphique : barres groupées visualisant l\'évolution des coûts moyens pour identifier les inflations tarifaires par spécialité.')
     ]
     used_image_cats = set()
     for table_key, img_cat, intro_table, intro_graph in couples:
@@ -1885,7 +2077,7 @@ def generer_rapport_html(global_indic: dict, reps: dict, evo: pd.DataFrame, comp
         if any(k == c[0] for c in couples):
             continue
         # Inclure explicitement nos tables mensuelles personnalisées (sauf celles déjà dans couples)
-        if k.endswith('_tableau') or k in {'repartition_par_region','repartition_par_province','repartition_par_type','repartition_par_sous_type','nombre_prestations_par_mois'}:
+        if k.endswith('_tableau') or k in {'repartition_par_region','repartition_par_province','repartition_par_type','repartition_par_sous_type','nombre_prestations_par_mois','montant_moyen_par_acte'}:
             unified_blocks.append(f"<section class='bloc'><h3>{meta['title']}</h3><p class='expl'>{meta['desc']}</p>{meta['html']}</section>")
 
     # Graphiques orphelins (sans tableau associé)
