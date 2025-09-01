@@ -14,6 +14,7 @@ from __future__ import annotations
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+import numpy as np
 from pathlib import Path
 import base64
 from io import BytesIO
@@ -568,6 +569,65 @@ def annotate_line_no_overlap(ax, x_vals, y_vals, texts, min_gap_frac=0.02, base_
             ax.annotate(texts[point_idx], (x + local_off, ly), ha='left', va='center', fontsize=8, linespacing=1.0)
             if abs(ly - oy) > 1e-9 or local_off != 0:
                 ax.plot([x, x + local_off*0.85], [oy, ly], color='gray', linewidth=0.5, linestyle=':')
+
+def plot_monthly_lines(pivot_data: pd.DataFrame, title: str, filename: str, year: int) -> Path | None:
+    """Crée un graphique en lignes multiples pour l'évolution mensuelle des prestations par acte."""
+    try:
+        if pivot_data.empty:
+            return None
+        
+        # Préparer les données (exclure la colonne Total)
+        data_cols = [col for col in pivot_data.columns if col != 'Total']
+        plot_data = pivot_data[data_cols]
+        
+        # Garder seulement les top 10 actes les plus fréquents pour la lisibilité
+        top_actes = pivot_data.nlargest(10, 'Total').index
+        plot_data = plot_data.loc[top_actes]
+        
+        fig, ax = plt.subplots(figsize=(12, 8))
+        
+        # Palette de couleurs distinctes
+        colors = plt.cm.tab10(np.linspace(0, 1, len(plot_data)))
+        
+        # Tracer une ligne par acte
+        for i, (acte, row) in enumerate(plot_data.iterrows()):
+            # Filtrer les valeurs non nulles pour éviter les lignes brisées
+            valid_data = [(j, val) for j, val in enumerate(row) if val > 0]
+            if valid_data:
+                x_vals, y_vals = zip(*valid_data)
+                ax.plot(x_vals, y_vals, marker='o', linewidth=2.5, markersize=6,
+                       label=acte, color=colors[i], alpha=0.8)
+        
+        # Personnalisation du graphique
+        ax.set_xlabel('Mois', fontsize=12, fontweight='bold')
+        ax.set_ylabel('Nombre de prestations', fontsize=12, fontweight='bold')
+        ax.set_title(title, fontsize=14, fontweight='bold', pad=20)
+        
+        # Labels des mois sur l'axe X
+        ax.set_xticks(range(len(data_cols)))
+        ax.set_xticklabels([col[:3].title() for col in data_cols], rotation=45)
+        
+        # Grille pour faciliter la lecture
+        ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
+        ax.set_facecolor('#fafafa')
+        
+        # Légende
+        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=9)
+        
+        # Format des valeurs sur l'axe Y
+        ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{int(x):,}'.replace(',', ' ')))
+        
+        plt.tight_layout()
+        
+        # Sauvegarde
+        path = FIG_DIR / filename
+        fig.savefig(path, dpi=300, bbox_inches='tight')
+        plt.close(fig)
+        return path
+        
+    except Exception as e:
+        print(f"Erreur lors de la création du graphique {filename}: {e}")
+        return None
 
 # ------------------ Export Excel ------------------ #
 
@@ -1157,12 +1217,40 @@ def export_word(global_indic: dict, reps: dict, evo: pd.DataFrame, comp_t1: pd.D
             if not rows: return
             ncols = max(len(r) for r in rows)
             tbl = doc.add_table(rows=1, cols=ncols)
+            # fonction de prettify pour rendre les clés lisibles
+            def prettify_label(s: str) -> str:
+                if not s or not isinstance(s, str):
+                    return str(s)
+                # alias map pour cas fréquents
+                aliases = {
+                    'analyse_biomedicale': 'Analyse biomédicale',
+                    'dentaire_auditif': 'Dentaire & Auditif',
+                    'maternite': 'Maternité',
+                    'hospitalisation': 'Hospitalisation',
+                    'optique': 'Optique',
+                    'consultation': 'Consultation',
+                    'pharmacie': 'Pharmacie',
+                    'autre': 'Autre'
+                }
+                key = s.strip()
+                low = key.lower()
+                if low in aliases:
+                    return aliases[low]
+                # Si ressemble à une clé (underscores, pas d'espaces), remplacer underscores et capitaliser
+                if '_' in key or (key == key.lower() and ' ' not in key and len(key) < 40):
+                    parts = key.replace('_', ' ').split()
+                    return ' '.join(p.capitalize() for p in parts)
+                return key
             for j, val in enumerate(rows[0]):
-                tbl.rows[0].cells[j].text = val
+                tbl.rows[0].cells[j].text = prettify_label(val)
             for r in rows[1:]:
                 row = tbl.add_row().cells
                 for j, val in enumerate(r):
-                    row[j].text = val
+                    # appliquer prettify sur la première colonne si nécessaire
+                    if j == 0:
+                        row[j].text = prettify_label(val)
+                    else:
+                        row[j].text = val
         import base64, tempfile
         def render_img(el):
             src = el.get('src') if parser_used!='bs4' else el.get('src','')
@@ -1226,7 +1314,16 @@ def export_word(global_indic: dict, reps: dict, evo: pd.DataFrame, comp_t1: pd.D
                             style = 'List Number' if cname=='ol' else 'List Bullet'
                             doc.add_paragraph(get_text(li), style=style)
                     elif cname == 'table':
-                        render_table(ch)
+                        # Vérifier si c'est le tableau des centres à masquer dans Word
+                        table_class = node.get('class', []) if hasattr(node, 'get') else []
+                        if isinstance(table_class, str):
+                            table_class = table_class.split()
+                        skip_centres_table = 'centres-table-skip-word' in table_class
+                        if skip_centres_table:
+                            # Ne pas insérer ce tableau dans Word - juste mettre un commentaire
+                            doc.add_paragraph('[Tableau "classement des centres" temporairement masqué dans ce document]', style=None)
+                        else:
+                            render_table(ch)
                     elif cname == 'figure':
                         render_figure(ch)
                     else:
@@ -1235,7 +1332,16 @@ def export_word(global_indic: dict, reps: dict, evo: pd.DataFrame, comp_t1: pd.D
                             for sub in children(ch):
                                 sname = get_name(sub)
                                 if sname == 'table':
-                                    render_table(sub)
+                                    # Vérifier si c'est le tableau des centres à masquer dans Word
+                                    table_class = sub.get('class', []) if hasattr(sub, 'get') else []
+                                    if isinstance(table_class, str):
+                                        table_class = table_class.split()
+                                    skip_centres_table = 'centres-table-skip-word' in table_class
+                                    if skip_centres_table:
+                                        # Ne pas insérer ce tableau dans Word - juste mettre un commentaire
+                                        doc.add_paragraph('[Tableau "classement des centres" temporairement masqué dans ce document]', style=None)
+                                    else:
+                                        render_table(sub)
                                 elif sname == 'figure':
                                     render_figure(sub)
         # Sauvegarde avec fallback si verrou
@@ -1413,7 +1519,9 @@ def generer_rapport_html(global_indic: dict, reps: dict, evo: pd.DataFrame, comp
                 for _, r in tbl_fmt.iterrows():
                     cells = ''.join(f'<td>{r[c]}</td>' for c in tbl_fmt.columns)
                     body_rows.append(f'<tr>{cells}</tr>')
-                html_table_inner = f"<table class='tbl'><thead><tr>{headers}</tr></thead><tbody>{''.join(body_rows)}</tbody></table>"
+                # Marquer spécialement le tableau des centres pour le masquer dans Word
+                table_class = 'tbl centres-table-skip-word' if key == 'repartition_par_centre' else 'tbl'
+                html_table_inner = f"<table class='{table_class}'><thead><tr>{headers}</tr></thead><tbody>{''.join(body_rows)}</tbody></table>"
                 html_table = f"<div class='scroll-box'>{html_table_inner}</div>" if original_len>20 else html_table_inner
                 if key == 'repartition_par_statut':
                     titre = 'Répartition par statut de traitement'
@@ -1464,6 +1572,109 @@ def generer_rapport_html(global_indic: dict, reps: dict, evo: pd.DataFrame, comp
     desc = table_desc.get('evolution_mensuelle_tableau','')
     intro = f"<p class='expl'>{desc}</p>" if desc else ''
     table_htmls['evolution_mensuelle_tableau'] = {"title": 'Évolution mensuelle (tableau)', "desc": table_desc.get('evolution_mensuelle_tableau',''), "html": html_table}
+
+    # Tableau dédié : Nombre total de prestations par mois (pour affichage clair)
+    try:
+        nb_tbl = evo.copy()
+        # nb_tbl a index 'mois' et colonnes montant_total, nb_prestations
+        nb_display = nb_tbl[['nb_prestations']].reset_index()
+        # formatter mois lisible si nécessaire
+        if nb_display.columns[0] != 'Mois':
+            nb_display = nb_display.rename(columns={nb_display.columns[0]: 'Mois'})
+        # ajouter numéro
+        nb_display.insert(0, 'Numéro', range(1, len(nb_display) + 1))
+        headers = ''.join(f"<th>{h}</th>" for h in nb_display.columns)
+        body_rows = []
+        for _, r in nb_display.iterrows():
+            cells = ''.join(f"<td>{r[c]}</td>" for c in nb_display.columns)
+            body_rows.append(f"<tr>{cells}</tr>")
+        html_table_inner = f"<table class='tbl'><thead><tr>{headers}</tr></thead><tbody>{''.join(body_rows)}</tbody></table>"
+        html_table_nb = f"<div class='scroll-box'>{html_table_inner}</div>" if len(nb_display) > 20 else html_table_inner
+        table_htmls['nombre_prestations_par_mois'] = {"title": 'Nombre total de prestations par mois', "desc": 'Tableau synthétique du nombre de prestations observées mois par mois.', "html": html_table_nb}
+    except Exception:
+        pass
+
+    # Analyse demandée : Nombre mensuel de chaque prestation (acte)
+    try:
+        acte_col = next((c for c in reps.get('repartition_par_acte', pd.DataFrame()).index.names if True), None)
+    except Exception:
+        acte_col = None
+    # Better: detect column name for 'acte' in original dataframe via header_first_map keys
+    try:
+        # si la répartition par acte existe, utiliser son index
+        if 'repartition_par_acte' in reps:
+            actes_index = reps['repartition_par_acte'].index
+            # construire un dataframe long mois x acte counts à partir de evo source (on a besoin du df original) -> utiliser df si accessible
+            # fallback: si evo contient les mois seulement, reconstruire depuis le dataframe initial n'est pas trivial ici
+            # donc tenter de recharger source et recalculer
+            df_src = charger(SOURCE_FILE)
+            date_col = next((c for c in df_src.columns if c.lower() == 'date'), None)
+            acte_col_name = next((c for c in df_src.columns if c.lower() == 'acte'), None)
+            if date_col and acte_col_name:
+                tmp = df_src[[date_col, acte_col_name]].copy()
+                tmp['Mois'] = tmp[date_col].dt.to_period('M').astype(str)
+                tmp['Annee'] = tmp[date_col].dt.year
+                
+                # Séparer les données par année
+                for annee in [2024, 2025]:
+                    tmp_annee = tmp[tmp['Annee'] == annee].copy()
+                    if tmp_annee.empty:
+                        continue
+                        
+                    # Créer tableau pivot : actes en lignes, mois en colonnes
+                    pivot_data = tmp_annee.groupby([acte_col_name, 'Mois']).size().unstack(fill_value=0)
+                    
+                    if pivot_data.empty:
+                        continue
+                    
+                    # Formatter les noms de mois en français
+                    def _fmt_m(m):
+                        try:
+                            dt = pd.Period(m, freq='M').to_timestamp()
+                            mois_fr = ['janvier','février','mars','avril','mai','juin','juillet','août','septembre','octobre','novembre','décembre'][dt.month-1]
+                            return f"{mois_fr}"
+                        except Exception:
+                            return m
+                    
+                    # Renommer les colonnes avec les mois français
+                    pivot_data.columns = [_fmt_m(col) for col in pivot_data.columns]
+                    
+                    # Trier les actes par total décroissant
+                    pivot_data['Total'] = pivot_data.sum(axis=1)
+                    pivot_data = pivot_data.sort_values('Total', ascending=False)
+                    
+                    # Construire le tableau HTML
+                    headers = '<th>Acte</th>' + ''.join(f'<th>{col}</th>' for col in pivot_data.columns)
+                    body_rows = []
+                    for acte, row in pivot_data.iterrows():
+                        cells = [f'<td style="font-weight:600;">{acte}</td>']
+                        for col in pivot_data.columns:
+                            val = int(row[col]) if row[col] > 0 else '-'
+                            if col == 'Total':
+                                cells.append(f'<td style="font-weight:600;background:#f0f8ff;">{val}</td>')
+                            else:
+                                cells.append(f'<td>{val}</td>')
+                        body_rows.append(f"<tr>{''.join(cells)}</tr>")
+                    
+                    html_table_inner = f"<table class='tbl'><thead><tr>{headers}</tr></thead><tbody>{''.join(body_rows)}</tbody></table>"
+                    
+                    # Créer des entrées séparées pour chaque année
+                    table_key = f'nombre_mensuel_par_acte_{annee}'
+                    table_htmls[table_key] = {
+                        "title": f'Nombre mensuel de chaque prestation (acte) - {annee}', 
+                        "desc": f'Tableau croisé dynamique pour l\'année {annee} : actes en lignes, mois en colonnes, avec totaux par acte.', 
+                        "html": html_table_inner
+                    }
+                    
+                    # Générer le graphique en lignes multiples correspondant
+                    chart_filename = f'evolution_mensuelle_actes_{annee}.png'
+                    chart_title = f'Évolution mensuelle des prestations par acte - {annee}'
+                    chart_path = plot_monthly_lines(pivot_data, chart_title, chart_filename, annee)
+                    if chart_path:
+                        # Ajouter à la liste des images générées
+                        images_paths.append(chart_path)
+    except Exception:
+        pass
 
     # Tableau d'évolution trimestrielle
     if isinstance(evo, pd.DataFrame) and not evo.empty:
@@ -1581,6 +1792,14 @@ def generer_rapport_html(global_indic: dict, reps: dict, evo: pd.DataFrame, comp
         'repartition_genre_pie': (
             "Répartition par genre",
             "Le découpage par genre met en évidence des écarts potentiels de recours. Une sur‑représentation stable peut traduire des habitudes de consultation différentes ou des profils pathologiques distincts. Cet indicateur sert de base à des analyses d'équité et à l'adaptation de programmes de prévention ciblés." 
+        ),
+        'evolution_mensuelle_actes_2024': (
+            "Évolution mensuelle des prestations par acte - 2024",
+            "Le graphique en lignes multiples révèle les tendances temporelles et la saisonnalité de chaque type de prestation sur l'année 2024. Les pics simultanés sur plusieurs actes peuvent signaler des campagnes de santé, tandis que les évolutions divergentes orientent vers des analyses spécifiques par spécialité."
+        ),
+        'evolution_mensuelle_actes_2025': (
+            "Évolution mensuelle des prestations par acte - 2025",
+            "Cette visualisation pour 2025 permet la comparaison avec 2024 et l'identification des changements de comportement ou d'organisation. Les tendances émergentes servent à anticiper les besoins futurs et ajuster la stratégie de couverture en temps réel."
         )
     }
     # Regrouper images par catégorie logique
@@ -1612,6 +1831,12 @@ def generer_rapport_html(global_indic: dict, reps: dict, evo: pd.DataFrame, comp
         elif stem.startswith('montant_par_sous_type'):
             # Histogramme des montants par sous-type : rattacher à la table repartition_par_sous_type
             cat = 'repartition_par_sous_type'
+        elif stem.startswith('evolution_mensuelle_actes_2024'):
+            # Nouveau graphique pour les prestations mensuelles par acte 2024
+            cat = 'nombre_mensuel_par_acte_2024'
+        elif stem.startswith('evolution_mensuelle_actes_2025'):
+            # Nouveau graphique pour les prestations mensuelles par acte 2025
+            cat = 'nombre_mensuel_par_acte_2025'
         elif stem.startswith('evolution_mensuelle'):
             cat = 'evolution_mensuelle'
         elif stem.startswith('evolution_trimestrielle'):
@@ -1640,7 +1865,9 @@ def generer_rapport_html(global_indic: dict, reps: dict, evo: pd.DataFrame, comp
         ('repartition_par_region','repartition_par_region','Tableau : montants et volumes par région ordonnés par poids financier.','Graphique : comparaison visuelle montants (barres) et volumes (entre parenthèses).'),
         ('repartition_par_province','repartition_par_province','Tableau : détail provincial (ordre décroissant) avec regroupement régional.','Graphique : mise en avant des provinces les plus contributrices.'),
         ('evolution_mensuelle_tableau','evolution_mensuelle','Tableau : détail chronologique mois par mois (montants et volumes).','Graphique : dynamique conjointe montants (courbe) et volumes (barres).'),
-        ('evolution_trimestrielle_tableau','evolution_trimestrielle','Tableau : consolidation trimestrielle (lissage des fluctuations mensuelles).','Graphique : trajectoire structurée des montants agrégés par trimestre.')
+        ('evolution_trimestrielle_tableau','evolution_trimestrielle','Tableau : consolidation trimestrielle (lissage des fluctuations mensuelles).','Graphique : trajectoire structurée des montants agrégés par trimestre.'),
+        ('nombre_mensuel_par_acte_2024','nombre_mensuel_par_acte_2024','Tableau : évolution mensuelle des prestations par acte en 2024.','Graphique : courbes multiples montrant les tendances temporelles pour chaque type de prestation.'),
+        ('nombre_mensuel_par_acte_2025','nombre_mensuel_par_acte_2025','Tableau : évolution mensuelle des prestations par acte en 2025.','Graphique : courbes multiples permettant la comparaison avec 2024 et l\'analyse des tendances émergentes.')
     ]
     used_image_cats = set()
     for table_key, img_cat, intro_table, intro_graph in couples:
@@ -1657,10 +1884,8 @@ def generer_rapport_html(global_indic: dict, reps: dict, evo: pd.DataFrame, comp
     for k, meta in table_htmls.items():
         if any(k == c[0] for c in couples):
             continue
-        if k.endswith('_tableau'):
-            # Evolution tables
-            unified_blocks.append(f"<section class='bloc'><h3>{meta['title']}</h3><p class='expl'>{meta['desc']}</p>{meta['html']}</section>")
-        elif k in {'repartition_par_region','repartition_par_province','repartition_par_type','repartition_par_sous_type'}:
+        # Inclure explicitement nos tables mensuelles personnalisées (sauf celles déjà dans couples)
+        if k.endswith('_tableau') or k in {'repartition_par_region','repartition_par_province','repartition_par_type','repartition_par_sous_type','nombre_prestations_par_mois'}:
             unified_blocks.append(f"<section class='bloc'><h3>{meta['title']}</h3><p class='expl'>{meta['desc']}</p>{meta['html']}</section>")
 
     # Graphiques orphelins (sans tableau associé)
