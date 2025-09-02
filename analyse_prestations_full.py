@@ -1239,7 +1239,13 @@ def main():
     # Répartition par bénéficiaire (camembert)
     if 'repartition_par_beneficiaire' in reps:
         try:
-            pb = plot_pie_group_small(reps['repartition_par_beneficiaire']['count'], 'Répartition des prestations par bénéficiaire', 'repartition_beneficiaire_pie.png', threshold=0.01)
+            # Filtrer pour ne garder que les adhérents et ayants droits
+            beneficiaire_data = reps['repartition_par_beneficiaire']['count'].copy()
+            # Exclure la ligne "Mutualiste" et "Proportion ayants droits/adhérents (%)"
+            beneficiaire_data = beneficiaire_data[
+                ~beneficiaire_data.index.str.contains('Mutualiste|Proportion', case=False, na=False)
+            ]
+            pb = plot_pie_group_small(beneficiaire_data, 'Répartition des prestations par bénéficiaire', 'repartition_beneficiaire_pie.png', threshold=0.01)
             if pb: images_paths.append(pb)
         except Exception:
             pass
@@ -1715,8 +1721,8 @@ def generer_rapport_html(global_indic: dict, reps: dict, evo: pd.DataFrame, comp
                 for _, r in tbl_fmt.iterrows():
                     cells = ''.join(f'<td>{r[c]}</td>' for c in tbl_fmt.columns)
                     body_rows.append(f'<tr>{cells}</tr>')
-                # Marquer spécialement le tableau des centres pour le masquer dans Word
-                table_class = 'tbl centres-table-skip-word' if key == 'repartition_par_centre' else 'tbl'
+                # Tableau des centres maintenant visible dans Word
+                table_class = 'tbl'
                 html_table_inner = f"<table class='{table_class}'><thead><tr>{headers}</tr></thead><tbody>{''.join(body_rows)}</tbody></table>"
                 html_table = f"<div class='scroll-box'>{html_table_inner}</div>" if original_len>20 else html_table_inner
                 if key == 'repartition_par_statut':
