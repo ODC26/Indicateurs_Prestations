@@ -1721,8 +1721,8 @@ def generer_rapport_html(global_indic: dict, reps: dict, evo: pd.DataFrame, comp
                 for _, r in tbl_fmt.iterrows():
                     cells = ''.join(f'<td>{r[c]}</td>' for c in tbl_fmt.columns)
                     body_rows.append(f'<tr>{cells}</tr>')
-                # Tableau des centres maintenant visible dans Word
-                table_class = 'tbl'
+                # Marquer spécialement le tableau des centres pour le masquer dans Word
+                table_class = 'tbl centres-table-skip-word' if key == 'repartition_par_centre' else 'tbl'
                 html_table_inner = f"<table class='{table_class}'><thead><tr>{headers}</tr></thead><tbody>{''.join(body_rows)}</tbody></table>"
                 html_table = f"<div class='scroll-box'>{html_table_inner}</div>" if original_len>20 else html_table_inner
                 if key == 'repartition_par_statut':

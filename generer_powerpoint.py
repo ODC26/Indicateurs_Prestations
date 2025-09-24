@@ -13,63 +13,19 @@ from pptx.enum.shapes import MSO_SHAPE
 import json
 
 def charger_donnees_analyse():
-    """Charge les données depuis le fichier source en utilisant la même fonction que le script principal"""
+    """Charge les données depuis le fichier source"""
     try:
-        # Importer et utiliser la fonction charger du script principal
-        import sys
-        sys.path.append('.')
-        from analyse_prestations_full import charger
-        return charger('Classeur1.xlsx')
+        df = pd.read_excel('Classeur1.xlsx')
+        return df
     except Exception as e:
         print(f"Erreur lors du chargement des données: {e}")
-        # Fallback vers la méthode manuelle
-        try:
-            df = pd.read_excel('Classeur1.xlsx')
-            # Appliquer les mêmes filtres que le script principal
-            date_col = next((c for c in df.columns if c.lower() == 'date'), None)
-            if date_col:
-                df = df.copy()
-                df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
-                df = df.dropna(subset=[date_col])
-                df = df[df[date_col].dt.year.isin([2024, 2025])]
-            return df
-        except Exception as e2:
-            print(f"Erreur lors du fallback: {e2}")
-            return None
+        return None
 
 def calculer_indicateurs_cles(df):
-    """Calcule les indicateurs clés en utilisant les mêmes fonctions que le script principal"""
+    """Calcule les indicateurs clés pour la présentation"""
     if df is None or df.empty:
         return {}
     
-    try:
-        # Importer et utiliser la fonction compute_global du script principal
-        import sys
-        sys.path.append('.')
-        from analyse_prestations_full import compute_global
-        indicateurs = compute_global(df)
-        
-        # Mapper les noms des indicateurs pour la compatibilité
-        mapping = {
-            'nb_prestations': 'nombre_prestations',
-            'nb_mutualistes_distincts': 'mutualistes_distincts',
-            'taux_recours_pct': 'taux_recours',
-            'taux_acceptation_pct': 'taux_acceptation'
-        }
-        
-        for old_key, new_key in mapping.items():
-            if old_key in indicateurs and new_key not in indicateurs:
-                indicateurs[new_key] = indicateurs[old_key]
-        
-        return indicateurs
-        
-    except Exception as e:
-        print(f"Erreur lors de l'import des fonctions principales: {e}")
-        # Fallback vers le calcul manuel
-        return calculer_indicateurs_fallback(df)
-
-def calculer_indicateurs_fallback(df):
-    """Calcul de fallback si l'import du script principal échoue"""
     montant_col = next((c for c in df.columns if c.lower().startswith('montant')), None)
     adherent_col = next((c for c in df.columns if 'adherent_code' in c.lower()), None)
     
@@ -84,7 +40,7 @@ def calculer_indicateurs_fallback(df):
     if adherent_col:
         indicateurs['mutualistes_distincts'] = df[adherent_col].nunique()
         indicateurs['taux_recours'] = (df[adherent_col].nunique() / 5284) * 100  # 5284 = total mutualistes éligibles
-
+    
     if 'statut' in df.columns:
         total = len(df)
         acceptes = (df['statut'] == 'accepté').sum() + (df['statut'] == 'accepte').sum()
