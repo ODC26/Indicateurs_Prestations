@@ -1,8 +1,3 @@
-# Environnement virtuel Python
-.venv/
-venv/
-
-
 # Ignorer tous les fichiers Excel
 *.xls
 *.xlsx
@@ -20,4 +15,3 @@ venv/
 *.dot
 *.dotx
 *.dotm
-*.rtf
